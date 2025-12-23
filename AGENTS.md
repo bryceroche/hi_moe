@@ -2,6 +2,13 @@
 
 This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get started.
 
+## Roles
+
+| Role | Agent | Responsibilities |
+|------|-------|------------------|
+| **Project Manager** | Claude | Prioritize work, sequence tasks, identify blockers, maintain project momentum, ensure architectural coherence |
+| **Lead Developer** | Bryce | Domain expertise, final decisions, implementation direction |
+
 ## Quick Reference
 
 ```bash
