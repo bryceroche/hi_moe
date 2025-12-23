@@ -14,6 +14,7 @@
 from __future__ import annotations
 import asyncio
 import json
+import logging
 import os
 import re
 import tempfile
@@ -30,6 +31,8 @@ from docker.models.containers import Container
 
 # From other specs
 from handoff_protocol import Artifact
+
+logger = logging.getLogger(__name__)
 ```
 
 ## Overview
@@ -197,23 +200,44 @@ EXECUTION_COMMANDS: dict[Language, list[str]] = {
     Language.RUST: ["./solution"],
 }
 
+def extract_java_classname(code: str) -> str:
+    """Extract public class name from Java code."""
+    match = re.search(r"public\s+class\s+(\w+)", code)
+    return match.group(1) if match else "Solution"
+
+
 def get_execution_command(language: Language, code: str) -> list[str]:
     """Get execution command, resolving any placeholders."""
     command = EXECUTION_COMMANDS[language].copy()
 
     if language == Language.JAVA:
-        # Extract class name from code
-        match = re.search(r"public\s+class\s+(\w+)", code)
-        classname = match.group(1) if match else "Solution"
+        classname = extract_java_classname(code)
         command = [c.replace("{classname}", classname) for c in command]
 
     return command
 
+
+def get_compilation_command(language: Language, code: str) -> list[str] | None:
+    """Get compilation command, resolving any placeholders."""
+    command = COMPILATION_COMMANDS.get(language)
+    if not command:
+        return None
+
+    command = command.copy()
+
+    if language == Language.JAVA:
+        classname = extract_java_classname(code)
+        # Replace filename placeholder
+        command = [c.replace("{filename}", f"{classname}.java") for c in command]
+
+    return command
+
 # Compilation commands per language
+# Note: Java uses {filename} placeholder, resolved at runtime via get_compilation_command
 COMPILATION_COMMANDS: dict[Language, list[str]] = {
     Language.CPP: ["g++", "-O2", "-std=c++17", "-o", "solution", "solution.cpp"],
     Language.C: ["gcc", "-O2", "-std=c11", "-o", "solution", "solution.c"],
-    Language.JAVA: ["javac", "solution.java"],
+    Language.JAVA: ["javac", "{filename}"],  # Placeholder, resolved in get_compilation_command
     Language.GO: ["go", "build", "-o", "solution", "solution.go"],
     Language.RUST: ["rustc", "-O", "-o", "solution", "solution.rs"],
 }
@@ -275,9 +299,13 @@ class ContainerRunner:
             container.start()
 
             # Send stdin data
-            socket = container.attach_socket(params={"stdin": 1, "stream": 1})
-            socket._sock.sendall(stdin_data.encode())
-            socket._sock.shutdown(2)  # Close stdin
+            try:
+                socket = container.attach_socket(params={"stdin": 1, "stream": 1})
+                socket._sock.sendall(stdin_data.encode())
+                socket._sock.shutdown(2)  # Close stdin
+            except Exception as e:
+                # Socket failure - container may still run, but won't receive input
+                logger.warning(f"Failed to send stdin to container: {e}")
 
             # Wait for completion with timeout
             timeout_sec = timeout_ms / 1000
@@ -491,11 +519,12 @@ class Compiler:
         image: str,
         workspace: Path,
         language: Language,
+        code: str,
         timeout_ms: int = 30000,
         memory_limit_mb: int = 512,
     ) -> CompilationResult:
         """Compile code in container."""
-        command = COMPILATION_COMMANDS.get(language)
+        command = get_compilation_command(language, code)
         if not command:
             return CompilationResult(
                 success=True,
@@ -552,13 +581,18 @@ class Compiler:
             mem_limit=f"{memory_limit_mb}m",
             network_disabled=True,
             security_opt=["no-new-privileges"],
+            cap_drop=["ALL"],                   # Drop all capabilities
             pids_limit=64,
             detach=True,
         )
 
         try:
             container.start()
-            exit_result = container.wait(timeout=timeout_ms / 1000)
+            timeout_sec = timeout_ms / 1000
+            exit_result = await asyncio.wait_for(
+                asyncio.to_thread(container.wait, timeout=timeout_sec),
+                timeout=timeout_sec + 1  # Extra buffer
+            )
 
             stdout = container.logs(stdout=True, stderr=False).decode()
             stderr = container.logs(stdout=False, stderr=True).decode()
@@ -572,6 +606,16 @@ class Compiler:
                 timed_out=False,
                 memory_exceeded=False,
             )
+        except asyncio.TimeoutError:
+            return ContainerResult(
+                exit_code=-1,
+                stdout="",
+                stderr="Compilation timed out",
+                execution_time_ms=0,
+                memory_used_kb=0,
+                timed_out=True,
+                memory_exceeded=False,
+            )
         except Exception as e:
             return ContainerResult(
                 exit_code=-1,
@@ -579,7 +623,7 @@ class Compiler:
                 stderr=str(e),
                 execution_time_ms=0,
                 memory_used_kb=0,
-                timed_out=True,
+                timed_out=False,
                 memory_exceeded=False,
             )
         finally:
@@ -655,6 +699,7 @@ class CodeRunner:
                     image=image,
                     workspace=workspace_path,
                     language=request.language,
+                    code=sanitized_code,
                     timeout_ms=30000,  # 30s compile timeout
                     memory_limit_mb=512,
                 )
@@ -708,8 +753,8 @@ class CodeRunner:
 
         # Java requires specific filename matching class name
         if request.language == Language.JAVA:
-            match = re.search(r"public\s+class\s+(\w+)", request.code)
-            filename = f"{match.group(1)}.java" if match else "Solution.java"
+            classname = extract_java_classname(request.code)
+            filename = f"{classname}.java"
         else:
             filename = f"solution.{extension}"
 
@@ -847,9 +892,15 @@ def artifact_to_execution_request(
     """Convert Fleet code artifact to execution request."""
     # Extract code from artifact
     code = artifact.inline_content
-    if not code and artifact.content_ref:
-        # Would need to fetch from Beads
-        raise ValueError("Large artifacts must be resolved before execution")
+
+    # Validate code content
+    if not code or not code.strip():
+        if artifact.content_ref:
+            # Large artifact needs resolution from Beads
+            raise ValueError("Large artifacts must be resolved before execution")
+        else:
+            # No content at all
+            raise ValueError("Artifact contains no code content")
 
     # Detect language from metadata
     language_str = artifact.metadata.get("language", "python")
@@ -976,20 +1027,22 @@ def sanitize_code(code: str, language: Language) -> str:
     # Remove null bytes
     code = code.replace("\x00", "")
 
-    # Language-specific checks
+    # Language-specific checks - log warnings but don't block
+    # Docker isolation is the primary defense
     if language in (Language.PYTHON, Language.PYTHON3):
-        # Block dangerous imports
         dangerous_patterns = [
-            r"import\s+os",
-            r"import\s+subprocess",
-            r"import\s+socket",
-            r"from\s+os\s+import",
-            r"__import__\s*\(",
-            r"eval\s*\(",
-            r"exec\s*\(",
-            r"open\s*\([^)]*['\"][wa]",  # Writing to files
+            (r"import\s+os", "os module"),
+            (r"import\s+subprocess", "subprocess module"),
+            (r"import\s+socket", "socket module"),
+            (r"from\s+os\s+import", "os module"),
+            (r"__import__\s*\(", "__import__"),
+            (r"eval\s*\(", "eval"),
+            (r"exec\s*\(", "exec"),
+            (r"open\s*\([^)]*['\"][wa]", "file write"),
         ]
-        # Note: These are logged but not blocked - Docker isolation is primary defense
+        for pattern, name in dangerous_patterns:
+            if re.search(pattern, code):
+                logger.warning(f"Potentially dangerous pattern detected: {name}")
 
     return code
 ```
