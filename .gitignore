@@ -5,6 +5,7 @@
 *.pem
 *.key
 secrets/
+feedback/
 
 # Python
 __pycache__/
