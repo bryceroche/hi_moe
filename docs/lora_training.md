@@ -377,12 +377,16 @@ Generate the JSONL files referenced in configs:
 """Generate training data for LoRA specialists from competitive programming datasets."""
 
 import json
+import random
 from pathlib import Path
 
 from datasets import load_dataset
 
+# Import from data_preparation module (or copy Domain/classify_problem here)
+from data_preparation import Domain, classify_problem
 
-def generate_training_data(output_dir: str = "data"):
+
+def generate_training_data(output_dir: str = "data", seed: int = 42):
     """Download datasets and generate domain-specific JSONL files."""
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -428,10 +432,14 @@ def generate_training_data(output_dir: str = "data"):
                     "difficulty": problem.get("difficulty", "unknown")
                 })
 
-    # Split train/eval (90/10)
+    # Shuffle and split train/eval (90/10)
+    random.seed(seed)
+
     def split_and_save(examples: list, prefix: str):
-        split_idx = int(len(examples) * 0.9)
-        train, eval_set = examples[:split_idx], examples[split_idx:]
+        shuffled = examples.copy()
+        random.shuffle(shuffled)
+        split_idx = int(len(shuffled) * 0.9)
+        train, eval_set = shuffled[:split_idx], shuffled[split_idx:]
 
         train_path = output_path / f"{prefix}_train.jsonl"
         eval_path = output_path / f"{prefix}_eval.jsonl"
@@ -516,10 +524,19 @@ def setup_lora(config: dict) -> LoraConfig:
     )
 
 
+SPECIALIST_TYPES = {
+    "python": "Python programming",
+    "math": "mathematical reasoning",
+    "algorithms": "algorithm design",
+    "data_structures": "data structure",
+}
+
+
 def format_training_example(example: dict) -> str:
     """Format dataset example into training prompt."""
+    specialist_type = SPECIALIST_TYPES.get(example.get("domain", ""), "programming")
     return f"""<|im_start|>system
-You are a specialist. Solve the problem step by step, then provide working code.
+You are a {specialist_type} specialist. Solve the problem step by step, then provide working code.
 <|im_end|>
 <|im_start|>user
 {example['problem']}
@@ -634,7 +651,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
-from code_runner import CodeRunner, ExecutionResult
+from code_runner import CodeRunner
 
 logger = logging.getLogger(__name__)
 
@@ -713,6 +730,9 @@ async def evaluate_pass_at_k(
         ))
 
     # Calculate metrics
+    if not results:
+        return {"pass@1": 0.0, f"pass@{k}": 0.0, "total_problems": 0, "details": []}
+
     pass_at_1 = sum(1 for r in results if r.first_pass_index == 0) / len(results)
     pass_at_k = sum(1 for r in results if r.passed) / len(results)
 
@@ -824,6 +844,18 @@ python train_lora.py \
 ### 2. Validate Before Deployment
 
 ```python
+import json
+
+
+def load_validation_set(path: str = "data/validation.jsonl") -> list[dict]:
+    """Load validation problems from JSONL file."""
+    problems = []
+    with open(path) as f:
+        for line in f:
+            problems.append(json.loads(line))
+    return problems
+
+
 async def validate_for_deployment(
     adapter_path: str,
     min_pass_at_1: float = 0.35,
@@ -938,12 +970,10 @@ async def promote_adapter(beads: BeadsClient, adapter_name: str):
     """Promote adapter to active after successful A/B test."""
     registry = await beads.get("system/adapters/registry")
 
-    # Deactivate old version
-    for name, entry in registry.items():
-        if name == adapter_name and entry.get("active"):
-            entry["active"] = False
+    if adapter_name not in registry:
+        raise ValueError(f"Adapter {adapter_name} not found in registry")
 
-    # Activate new version
+    # Activate the adapter (registry stores one version per name)
     registry[adapter_name]["active"] = True
 
     await beads.set("system/adapters/registry", registry)
