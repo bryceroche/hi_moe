@@ -114,7 +114,7 @@ class VLLMServer:
     @modal.enter()
     def start_server(self):
         """Initialize vLLM engine on container start."""
-        from vllm import LLM, SamplingParams
+        from vllm import LLM
         from vllm.lora.request import LoRARequest
         import os
 
@@ -231,78 +231,66 @@ class VLLMServer:
         }
 
 
-# Web endpoint for OpenAI-compatible API
-@app.function(
-    image=vllm_image,
-    gpu=modal.gpu.A100(size="40GB"),
-    volumes={
-        MODEL_PATH: model_volume,
-        ADAPTERS_PATH: adapter_volume,
-    },
-    timeout=3600,
-    container_idle_timeout=300,
-)
-@modal.asgi_app()
-def serve():
-    """Serve OpenAI-compatible API endpoint."""
-    from fastapi import FastAPI, HTTPException
-    from pydantic import BaseModel
+    @modal.asgi_app()
+    def serve(self):
+        """Serve OpenAI-compatible API endpoint on the same container."""
+        from fastapi import FastAPI
+        from pydantic import BaseModel
 
-    app = FastAPI(title="hi-moe vLLM API")
-    server = VLLMServer()
+        api = FastAPI(title="hi-moe vLLM API")
 
-    class ChatRequest(BaseModel):
-        model: str = "base"  # "base" or adapter name
-        messages: list[dict]
-        max_tokens: int = 2048
-        temperature: float = 0.7
+        class ChatRequest(BaseModel):
+            model: str = "base"  # "base" or adapter name
+            messages: list[dict]
+            max_tokens: int = 2048
+            temperature: float = 0.7
 
-    class ChatResponse(BaseModel):
-        id: str
-        choices: list[dict]
-        usage: dict
+        class ChatResponse(BaseModel):
+            id: str
+            choices: list[dict]
+            usage: dict
 
-    @app.post("/v1/chat/completions")
-    async def chat_completions(request: ChatRequest) -> ChatResponse:
-        adapter = None if request.model == "base" else request.model
+        @api.post("/v1/chat/completions")
+        def chat_completions(request: ChatRequest) -> ChatResponse:
+            adapter = None if request.model == "base" else request.model
 
-        result = server.chat.remote(
-            messages=request.messages,
-            adapter_name=adapter,
-            max_tokens=request.max_tokens,
-            temperature=request.temperature,
-        )
+            result = self.chat(
+                messages=request.messages,
+                adapter_name=adapter,
+                max_tokens=request.max_tokens,
+                temperature=request.temperature,
+            )
 
-        return ChatResponse(
-            id="chatcmpl-" + str(hash(result["text"]))[:8],
-            choices=[{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": result["text"],
+            return ChatResponse(
+                id="chatcmpl-" + format(abs(hash(result["text"])), "x")[:8],
+                choices=[{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": result["text"],
+                    },
+                    "finish_reason": result["finish_reason"],
+                }],
+                usage={
+                    "prompt_tokens": result["prompt_tokens"],
+                    "completion_tokens": result["completion_tokens"],
+                    "total_tokens": result["prompt_tokens"] + result["completion_tokens"],
                 },
-                "finish_reason": result["finish_reason"],
-            }],
-            usage={
-                "prompt_tokens": result["prompt_tokens"],
-                "completion_tokens": result["completion_tokens"],
-                "total_tokens": result["prompt_tokens"] + result["completion_tokens"],
-            },
-        )
+            )
 
-    @app.get("/v1/models")
-    async def list_models():
-        adapters = server.list_adapters.remote()
-        models = [{"id": "base", "object": "model"}]
-        for adapter in adapters:
-            models.append({"id": adapter, "object": "model"})
-        return {"data": models}
+        @api.get("/v1/models")
+        def list_models():
+            adapters = self.list_adapters()
+            models = [{"id": "base", "object": "model"}]
+            for adapter in adapters:
+                models.append({"id": adapter, "object": "model"})
+            return {"data": models}
 
-    @app.get("/health")
-    async def health():
-        return server.health.remote()
+        @api.get("/health")
+        def health():
+            return self.health()
 
-    return app
+        return api
 ```
 
 ### Deployment Commands
@@ -342,7 +330,6 @@ training_image = (
         "datasets",
         "bitsandbytes",
         "accelerate",
-        "wandb",
     )
 )
 
@@ -425,10 +412,18 @@ def train_lora(
         },
     )
 
-    # Format function
+    # Format function with domain-specific specialist types
+    SPECIALIST_TYPES = {
+        "python": "Python programming",
+        "math": "mathematical reasoning",
+        "algorithms": "algorithm design",
+        "data_structures": "data structure",
+    }
+
     def format_example(example):
+        specialist_type = SPECIALIST_TYPES.get(example.get("domain", ""), "programming")
         return f"""<|im_start|>system
-You are a specialist. Solve the problem step by step, then provide working code.
+You are a {specialist_type} specialist. Solve the problem step by step, then provide working code.
 <|im_end|>
 <|im_start|>user
 {example['problem']}
@@ -476,12 +471,9 @@ You are a specialist. Solve the problem step by step, then provide working code.
 
     trainer.train()
 
-    # Save adapter
+    # Save adapter (volume auto-commits on function exit)
     model.save_pretrained(output_dir)
     print(f"Saved adapter to {output_dir}")
-
-    # Commit volume changes
-    adapter_volume.commit()
 
     return {"adapter_name": adapter_name, "output_dir": output_dir}
 
@@ -554,8 +546,9 @@ class ModalClient:
     """Client for hi_moe Modal deployment."""
 
     def __init__(self, config: ModalConfig):
+        self.endpoint = config.endpoint.rstrip("/")
         self.client = AsyncOpenAI(
-            base_url=f"{config.endpoint}/v1",
+            base_url=f"{self.endpoint}/v1",
             api_key=config.api_key,
         )
 
@@ -589,7 +582,7 @@ class ModalClient:
 
         async with httpx.AsyncClient() as client:
             try:
-                resp = await client.get(f"{self.client.base_url}/../health")
+                resp = await client.get(f"{self.endpoint}/health")
                 return resp.status_code == 200
             except Exception:
                 return False
@@ -723,6 +716,9 @@ Modal provides built-in monitoring at https://modal.com/apps:
 Log to Beads for hi_moe-specific tracking:
 
 ```python
+from datetime import datetime
+
+
 async def log_request(beads, request_info: dict):
     await beads.append("system/metrics/modal_requests", {
         "timestamp": datetime.now().isoformat(),
