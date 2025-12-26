@@ -123,3 +123,6 @@ temp/
 
 # Local scratch files
 task.md
+
+# Trajectory logs (test artifacts)
+runs/

@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, TYPE_CHECKING
 
 from .dispatcher_schema import (
     DispatcherPlan,
@@ -14,6 +15,9 @@ from .dispatcher_schema import (
     get_dispatcher_plan,
     VALID_SPECIALISTS,
 )
+
+if TYPE_CHECKING:
+    from .trajectory_logger import TrajectoryLogger
 
 logger = logging.getLogger(__name__)
 
@@ -189,9 +193,15 @@ class ProgressMonitor:
 class AbstractArchitect:
     """Tier 1: Strategic planning and task decomposition."""
 
-    def __init__(self, dispatcher: "RoutingDispatcher", llm: LLMClient):
+    def __init__(
+        self,
+        dispatcher: "RoutingDispatcher",
+        llm: LLMClient,
+        trajectory_logger: "TrajectoryLogger | None" = None,
+    ):
         self.dispatcher = dispatcher
         self.llm = llm
+        self.trajectory_logger = trajectory_logger
 
     async def execute(self, task: Task) -> Outcome:
         """Create execution plan and delegate to Dispatcher."""
@@ -223,8 +233,35 @@ class AbstractArchitect:
             constraints=task.constraints,
         )
 
+        # Log architect decision before execution (hi_moe-r8q)
+        if self.trajectory_logger:
+            from .trajectory_logger import ArchitectRecord
+            architect_record = ArchitectRecord(
+                ts=datetime.utcnow().isoformat(),
+                task_id=task.task_id,
+                goal=task.objective,
+                plan=plan,
+                delegation={
+                    "task_id": subtask.task_id,
+                    "objective": subtask.objective,
+                },
+                success_criteria=task.constraints if task.constraints else None,
+                metadata={"context": task.context},
+            )
+
         # Delegate to Dispatcher
-        return await self.dispatcher.execute(subtask)
+        outcome = await self.dispatcher.execute(subtask)
+
+        # Update and log architect record with outcome (hi_moe-r8q)
+        if self.trajectory_logger:
+            architect_record.outcome_status = outcome.status.value
+            architect_record.outcome_summary = (
+                f"Completed with code" if outcome.status == TaskStatus.COMPLETED
+                else f"Failed: {outcome.error}"
+            )
+            self.trajectory_logger.log_architect(architect_record)
+
+        return outcome
 
     def _create_plan_prompt(self, task: Task) -> str:
         context_str = ""
@@ -245,9 +282,15 @@ class RoutingDispatcher:
     Produces linear sequence of steps, executes sequentially.
     """
 
-    def __init__(self, fleet: "SpecializedFleet", llm: LLMClient | None = None):
+    def __init__(
+        self,
+        fleet: "SpecializedFleet",
+        llm: LLMClient | None = None,
+        trajectory_logger: "TrajectoryLogger | None" = None,
+    ):
         self.fleet = fleet
         self.llm = llm  # Optional: for structured plan generation
+        self.trajectory_logger = trajectory_logger
 
     async def execute(self, task: Task) -> Outcome:
         """Route task to specialist and execute."""
@@ -265,7 +308,29 @@ class RoutingDispatcher:
         # Fallback: heuristic-based routing (original behavior)
         specialist = self._select_specialist(task)
         logger.info(f"[Dispatcher] Selected specialist: {specialist}")
-        return await self.fleet.execute(task, specialist)
+
+        # Log heuristic routing decision (hi_moe-r8q)
+        if self.trajectory_logger:
+            from .trajectory_logger import DispatcherRecord
+            dispatcher_record = DispatcherRecord(
+                ts=datetime.utcnow().isoformat(),
+                task_id=task.task_id,
+                task_objective=task.objective,
+                routing_decision="heuristic",
+                specialist=specialist,
+                rationale=f"Heuristic keyword match selected {specialist}",
+                context_summary=str(task.context)[:200] if task.context else None,
+            )
+
+        outcome = await self.fleet.execute(task, specialist)
+
+        # Update and log dispatcher record (hi_moe-r8q)
+        if self.trajectory_logger:
+            dispatcher_record.outcome_status = outcome.status.value
+            dispatcher_record.outcome_error = outcome.error
+            self.trajectory_logger.log_dispatcher(dispatcher_record)
+
+        return outcome
 
     async def _execute_with_plan(self, task: Task) -> Outcome:
         """Execute task using LLM-generated structured plan.
@@ -281,6 +346,22 @@ class RoutingDispatcher:
         )
 
         logger.info(f"[Dispatcher] Got plan with {len(plan.steps)} steps")
+
+        # Prepare plan steps for logging
+        plan_steps = [{"description": s.description, "specialist": s.specialist} for s in plan.steps]
+
+        # Log structured plan routing decision (hi_moe-r8q)
+        if self.trajectory_logger:
+            from .trajectory_logger import DispatcherRecord
+            dispatcher_record = DispatcherRecord(
+                ts=datetime.utcnow().isoformat(),
+                task_id=task.task_id,
+                task_objective=task.objective,
+                routing_decision="structured_plan",
+                plan_steps=plan_steps,
+                rationale=f"LLM generated {len(plan.steps)}-step plan",
+                context_summary=str(task.context)[:200] if task.context else None,
+            )
 
         # Execute steps sequentially
         all_results = []
@@ -316,28 +397,43 @@ class RoutingDispatcher:
             # Stop on failure (re-plan would happen at higher tier)
             if outcome.status == TaskStatus.FAILED:
                 logger.warning(f"[Dispatcher] Step {i + 1} failed, stopping execution")
-                return Outcome(
+                final_outcome = Outcome(
                     task_id=task.task_id,
                     status=TaskStatus.FAILED,
                     error=f"Step {i + 1} failed: {outcome.error}",
                     result={"completed_steps": all_results},
-                    metadata={"plan": [{"description": s.description, "specialist": s.specialist} for s in plan.steps]},
+                    metadata={"plan": plan_steps},
                 )
+
+                # Log dispatcher record with failure (hi_moe-r8q)
+                if self.trajectory_logger:
+                    dispatcher_record.outcome_status = final_outcome.status.value
+                    dispatcher_record.outcome_error = final_outcome.error
+                    self.trajectory_logger.log_dispatcher(dispatcher_record)
+
+                return final_outcome
 
         # All steps completed
         logger.info(f"[Dispatcher] All {len(plan.steps)} steps completed")
 
         # Return final step's result as the outcome
         final_result = all_results[-1] if all_results else None
-        return Outcome(
+        final_outcome = Outcome(
             task_id=task.task_id,
             status=TaskStatus.COMPLETED,
             result=final_result.get("result") if final_result else None,
             metadata={
-                "plan": [{"description": s.description, "specialist": s.specialist} for s in plan.steps],
+                "plan": plan_steps,
                 "all_steps": all_results,
             },
         )
+
+        # Log dispatcher record with success (hi_moe-r8q)
+        if self.trajectory_logger:
+            dispatcher_record.outcome_status = final_outcome.status.value
+            self.trajectory_logger.log_dispatcher(dispatcher_record)
+
+        return final_outcome
 
     def _select_specialist(self, task: Task) -> str:
         """Select specialist based on task content (heuristic fallback)."""
@@ -356,36 +452,81 @@ class RoutingDispatcher:
 class SpecializedFleet:
     """Tier 3: Execute tasks with specialist capabilities."""
 
-    def __init__(self, llm: LLMClient):
+    def __init__(
+        self,
+        llm: LLMClient,
+        trajectory_logger: "TrajectoryLogger | None" = None,
+    ):
         self.llm = llm
+        self.trajectory_logger = trajectory_logger
 
     async def execute(self, task: Task, specialist: str) -> Outcome:
         """Execute task with specified specialist."""
         logger.info(f"[Fleet] Executing with {specialist} specialist")
 
         prompt = self._create_execution_prompt(task, specialist)
+        system_prompt = self._get_system_prompt(specialist)
+        start_time = time.monotonic()
 
         try:
             response = await self.llm.generate(
                 [
-                    {"role": "system", "content": self._get_system_prompt(specialist)},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.2,
             )
 
+            execution_time_ms = (time.monotonic() - start_time) * 1000
+
             # Extract code from response
             code = self._extract_code(response)
 
-            return Outcome(
+            outcome = Outcome(
                 task_id=task.task_id,
                 status=TaskStatus.COMPLETED,
                 result={"code": code, "raw_response": response},
                 metadata={"specialist": specialist},
             )
 
+            # Log fleet execution (hi_moe-r8q)
+            if self.trajectory_logger:
+                from .trajectory_logger import FleetRecord
+                fleet_record = FleetRecord(
+                    ts=datetime.utcnow().isoformat(),
+                    task_id=task.task_id,
+                    task_objective=task.objective,
+                    specialist=specialist,
+                    prompt_used=system_prompt,
+                    output_code=code,
+                    output_raw=response[:2000] if len(response) > 2000 else response,
+                    execution_time_ms=execution_time_ms,
+                    status="success",
+                    metadata={"context": task.context},
+                )
+                self.trajectory_logger.log_fleet(fleet_record)
+
+            return outcome
+
         except Exception as e:
+            execution_time_ms = (time.monotonic() - start_time) * 1000
             logger.error(f"[Fleet] Execution failed: {e}")
+
+            # Log fleet execution failure (hi_moe-r8q)
+            if self.trajectory_logger:
+                from .trajectory_logger import FleetRecord
+                fleet_record = FleetRecord(
+                    ts=datetime.utcnow().isoformat(),
+                    task_id=task.task_id,
+                    task_objective=task.objective,
+                    specialist=specialist,
+                    prompt_used=system_prompt,
+                    execution_time_ms=execution_time_ms,
+                    status="error",
+                    error=str(e),
+                )
+                self.trajectory_logger.log_fleet(fleet_record)
+
             return Outcome(
                 task_id=task.task_id,
                 status=TaskStatus.FAILED,
