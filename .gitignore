@@ -6,6 +6,8 @@
 *.key
 secrets/
 feedback/
+other/
+
 
 # Python
 __pycache__/

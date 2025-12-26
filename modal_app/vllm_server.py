@@ -2,16 +2,30 @@
 from __future__ import annotations
 
 import modal
+from pydantic import BaseModel
 
 app = modal.App("hi-moe-inference")
 
-# Persistent volumes for model weights and adapters
-model_volume = modal.Volume.from_name("hi-moe-models", create_if_missing=True)
+
+# Pydantic models for API (defined at module level for FastAPI)
+class ChatRequest(BaseModel):
+    model: str = "base"  # "base" or adapter name
+    messages: list[dict]
+    max_tokens: int = 2048
+    temperature: float = 0.7
+
+
+class ChatResponse(BaseModel):
+    id: str
+    choices: list[dict]
+    usage: dict
+
+# Persistent volume for LoRA adapters only
 adapter_volume = modal.Volume.from_name("hi-moe-adapters", create_if_missing=True)
 
 MODEL_ID = "Qwen/QwQ-32B-AWQ"
+TOKENIZER_ID = "Qwen/QwQ-32B"  # Use base model tokenizer (has vocab.json)
 ADAPTERS_PATH = "/adapters"
-MODEL_PATH = "/models"
 
 # Container image with vLLM
 vllm_image = (
@@ -22,16 +36,16 @@ vllm_image = (
         "hf_transfer",
         "fastapi",
         "pydantic",
+        "transformers",
     )
     .env({"HF_HUB_ENABLE_HF_TRANSFER": "1"})
 )
 
 
 @app.cls(
-    gpu="A100-40GB",
+    gpu="A100-80GB",  # 32B model with LoRA needs 80GB
     image=vllm_image,
     volumes={
-        MODEL_PATH: model_volume,
         ADAPTERS_PATH: adapter_volume,
     },
     timeout=3600,  # 1 hour max request time
@@ -42,22 +56,11 @@ class VLLMServer:
     @modal.enter()
     def start_server(self):
         """Initialize vLLM engine on container start."""
-        from huggingface_hub import snapshot_download
         from vllm import LLM
         from vllm.lora.request import LoRARequest
         import os
 
-        model_path = f"{MODEL_PATH}/{MODEL_ID}"
-
-        # Download model if not already cached in volume
-        if not os.path.exists(model_path):
-            print(f"Downloading {MODEL_ID}...")
-            snapshot_download(
-                MODEL_ID,
-                local_dir=model_path,
-                ignore_patterns=["*.md", "*.txt"],
-            )
-            print("Download complete.")
+        print(f"Loading {MODEL_ID} with tokenizer from {TOKENIZER_ID}...")
 
         # Discover available adapters
         self.adapters = {}
@@ -68,15 +71,19 @@ class VLLMServer:
                     self.adapters[adapter_name] = adapter_path
 
         # Initialize vLLM with LoRA support
+        # Use base model tokenizer to avoid AWQ's missing vocab.json issue
         self.llm = LLM(
-            model=model_path,
+            model=MODEL_ID,
+            tokenizer=TOKENIZER_ID,
             quantization="awq",
             enable_lora=True,
-            max_loras=16,
+            max_loras=8,
             max_lora_rank=64,
             tensor_parallel_size=1,
             gpu_memory_utilization=0.9,
-            max_model_len=8192,
+            max_model_len=4096,
+            trust_remote_code=True,
+            enforce_eager=True,  # Disable torch.compile to save memory
         )
 
         self.lora_id_counter = 1
@@ -92,8 +99,7 @@ class VLLMServer:
             self.lora_id_counter += 1
             print(f"Registered adapter: {name}")
 
-    @modal.method()
-    def generate(
+    def _generate_internal(
         self,
         prompt: str,
         adapter_name: str | None = None,
@@ -102,7 +108,7 @@ class VLLMServer:
         top_p: float = 0.95,
         stop: list[str] | None = None,
     ) -> dict:
-        """Generate completion with optional LoRA adapter."""
+        """Internal generate method callable from ASGI endpoints."""
         from vllm import SamplingParams
 
         sampling_params = SamplingParams(
@@ -131,6 +137,43 @@ class VLLMServer:
             "finish_reason": output.outputs[0].finish_reason,
         }
 
+    def _chat_internal(
+        self,
+        messages: list[dict],
+        adapter_name: str | None = None,
+        max_tokens: int = 2048,
+        temperature: float = 0.7,
+    ) -> dict:
+        """Internal chat method callable from ASGI endpoints."""
+        # Format messages as ChatML
+        prompt = ""
+        for msg in messages:
+            role = msg["role"]
+            content = msg["content"]
+            prompt += f"<|im_start|>{role}\n{content}<|im_end|>\n"
+        prompt += "<|im_start|>assistant\n"
+
+        return self._generate_internal(
+            prompt=prompt,
+            adapter_name=adapter_name,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            stop=["<|im_end|>"],
+        )
+
+    @modal.method()
+    def generate(
+        self,
+        prompt: str,
+        adapter_name: str | None = None,
+        max_tokens: int = 2048,
+        temperature: float = 0.7,
+        top_p: float = 0.95,
+        stop: list[str] | None = None,
+    ) -> dict:
+        """Generate completion with optional LoRA adapter."""
+        return self._generate_internal(prompt, adapter_name, max_tokens, temperature, top_p, stop)
+
     @modal.method()
     def chat(
         self,
@@ -140,21 +183,7 @@ class VLLMServer:
         temperature: float = 0.7,
     ) -> dict:
         """Chat completion with ChatML formatting."""
-        # Format messages as ChatML
-        prompt = ""
-        for msg in messages:
-            role = msg["role"]
-            content = msg["content"]
-            prompt += f"<|im_start|>{role}\n{content}<|im_end|>\n"
-        prompt += "<|im_start|>assistant\n"
-
-        return self.generate(
-            prompt=prompt,
-            adapter_name=adapter_name,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            stop=["<|im_end|>"],
-        )
+        return self._chat_internal(messages, adapter_name, max_tokens, temperature)
 
     @modal.method()
     def list_adapters(self) -> list[str]:
@@ -168,37 +197,25 @@ class VLLMServer:
             "status": "healthy",
             "model": MODEL_ID,
             "adapters": list(self.lora_requests.keys()),
-            "max_model_len": 8192,
+            "max_model_len": 4096,
         }
 
     @modal.asgi_app()
     def serve(self):
         """Serve OpenAI-compatible API endpoint on the same container."""
         from fastapi import FastAPI
-        from pydantic import BaseModel
 
         api = FastAPI(title="hi-moe vLLM API")
 
-        class ChatRequest(BaseModel):
-            model: str = "base"  # "base" or adapter name
-            messages: list[dict]
-            max_tokens: int = 2048
-            temperature: float = 0.7
-
-        class ChatResponse(BaseModel):
-            id: str
-            choices: list[dict]
-            usage: dict
-
         @api.post("/v1/chat/completions")
-        def chat_completions(request: ChatRequest) -> ChatResponse:
-            adapter = None if request.model == "base" else request.model
+        def chat_completions(body: ChatRequest) -> ChatResponse:
+            adapter = None if body.model == "base" else body.model
 
-            result = self.chat(
-                messages=request.messages,
+            result = self._chat_internal(
+                messages=body.messages,
                 adapter_name=adapter,
-                max_tokens=request.max_tokens,
-                temperature=request.temperature,
+                max_tokens=body.max_tokens,
+                temperature=body.temperature,
             )
 
             return ChatResponse(
@@ -220,14 +237,18 @@ class VLLMServer:
 
         @api.get("/v1/models")
         def list_models():
-            adapters = self.list_adapters()
             models = [{"id": "base", "object": "model"}]
-            for adapter in adapters:
+            for adapter in self.lora_requests.keys():
                 models.append({"id": adapter, "object": "model"})
             return {"data": models}
 
         @api.get("/health")
         def health():
-            return self.health()
+            return {
+                "status": "healthy",
+                "model": MODEL_ID,
+                "adapters": list(self.lora_requests.keys()),
+                "max_model_len": 4096,
+            }
 
         return api
