@@ -26,8 +26,35 @@ adapter_volume = modal.Volume.from_name("hi-moe-adapters", create_if_missing=Tru
 MODEL_ID = "Qwen/QwQ-32B-AWQ"
 TOKENIZER_ID = "Qwen/QwQ-32B"  # Use base model tokenizer (has vocab.json)
 ADAPTERS_PATH = "/adapters"
+MODEL_DIR = "/models"
 
-# Container image with vLLM
+
+def download_models():
+    """Download model weights during image build to eliminate cold start download."""
+    from huggingface_hub import snapshot_download
+    import os
+
+    os.makedirs(MODEL_DIR, exist_ok=True)
+
+    # Download AWQ model
+    print(f"Downloading {MODEL_ID}...")
+    snapshot_download(
+        MODEL_ID,
+        local_dir=f"{MODEL_DIR}/{MODEL_ID}",
+        ignore_patterns=["*.md", "*.txt"],
+    )
+
+    # Download tokenizer from base model
+    print(f"Downloading tokenizer from {TOKENIZER_ID}...")
+    snapshot_download(
+        TOKENIZER_ID,
+        local_dir=f"{MODEL_DIR}/{TOKENIZER_ID}",
+        allow_patterns=["tokenizer*", "vocab*", "merges*", "*.json"],
+    )
+    print("Model download complete!")
+
+
+# Container image with vLLM - bake model into image for fast cold starts
 vllm_image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
@@ -39,6 +66,7 @@ vllm_image = (
         "transformers",
     )
     .env({"HF_HUB_ENABLE_HF_TRANSFER": "1"})
+    .run_function(download_models)  # Bake model into image
 )
 
 
@@ -60,7 +88,12 @@ class VLLMServer:
         from vllm.lora.request import LoRARequest
         import os
 
-        print(f"Loading {MODEL_ID} with tokenizer from {TOKENIZER_ID}...")
+        # Use local paths from baked-in model
+        model_path = f"{MODEL_DIR}/{MODEL_ID}"
+        tokenizer_path = f"{MODEL_DIR}/{TOKENIZER_ID}"
+
+        print(f"Loading model from {model_path}...")
+        print(f"Loading tokenizer from {tokenizer_path}...")
 
         # Discover available adapters
         self.adapters = {}
@@ -71,10 +104,10 @@ class VLLMServer:
                     self.adapters[adapter_name] = adapter_path
 
         # Initialize vLLM with LoRA support
-        # Use base model tokenizer to avoid AWQ's missing vocab.json issue
+        # Use local paths for fast cold starts (model baked into image)
         self.llm = LLM(
-            model=MODEL_ID,
-            tokenizer=TOKENIZER_ID,
+            model=model_path,
+            tokenizer=tokenizer_path,
             quantization="awq",
             enable_lora=True,
             max_loras=8,
