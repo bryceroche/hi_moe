@@ -1,4 +1,4 @@
-"""vLLM server deployment on Modal with LoRA support."""
+"""vLLM server deployment on Modal with LoRA support and interaction logging."""
 from __future__ import annotations
 
 import modal
@@ -20,12 +20,15 @@ class ChatResponse(BaseModel):
     choices: list[dict]
     usage: dict
 
-# Persistent volume for LoRA adapters only
+
+# Persistent volumes
 adapter_volume = modal.Volume.from_name("hi-moe-adapters", create_if_missing=True)
+logs_volume = modal.Volume.from_name("hi-moe-logs", create_if_missing=True)
 
 MODEL_ID = "Qwen/QwQ-32B-AWQ"
 TOKENIZER_ID = "Qwen/QwQ-32B"  # Use base model tokenizer (has vocab.json)
 ADAPTERS_PATH = "/adapters"
+LOGS_PATH = "/logs"
 MODEL_DIR = "/models"
 
 
@@ -75,6 +78,7 @@ vllm_image = (
     image=vllm_image,
     volumes={
         ADAPTERS_PATH: adapter_volume,
+        LOGS_PATH: logs_volume,
     },
     timeout=3600,  # 1 hour max request time
     scaledown_window=300,  # Keep warm for 5 min
@@ -132,6 +136,58 @@ class VLLMServer:
             self.lora_id_counter += 1
             print(f"Registered adapter: {name}")
 
+        # Initialize logging
+        import os
+        os.makedirs(LOGS_PATH, exist_ok=True)
+
+    def _log_interaction(
+        self,
+        request_id: str,
+        messages: list[dict],
+        response: str,
+        adapter_name: str | None,
+        prompt_tokens: int,
+        completion_tokens: int,
+        temperature: float,
+        max_tokens: int,
+        finish_reason: str,
+    ):
+        """Log interaction to JSONL file for training data collection."""
+        import json
+        import os
+        from datetime import datetime
+
+        log_entry = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "request_id": request_id,
+            "model": MODEL_ID,
+            "adapter": adapter_name,
+            "messages": messages,
+            "response": response,
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            },
+            "params": {
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            },
+            "finish_reason": finish_reason,
+        }
+
+        # Write to daily log file
+        date_str = datetime.utcnow().strftime("%Y-%m-%d")
+        log_file = f"{LOGS_PATH}/interactions_{date_str}.jsonl"
+
+        try:
+            with open(log_file, "a") as f:
+                f.write(json.dumps(log_entry) + "\n")
+            # Commit volume changes periodically (every write for now)
+            logs_volume.commit()
+        except Exception as e:
+            print(f"Warning: Failed to log interaction: {e}")
+
     def _generate_internal(
         self,
         prompt: str,
@@ -178,6 +234,8 @@ class VLLMServer:
         temperature: float = 0.7,
     ) -> dict:
         """Internal chat method callable from ASGI endpoints."""
+        import uuid
+
         # Format messages as ChatML
         prompt = ""
         for msg in messages:
@@ -186,13 +244,29 @@ class VLLMServer:
             prompt += f"<|im_start|>{role}\n{content}<|im_end|>\n"
         prompt += "<|im_start|>assistant\n"
 
-        return self._generate_internal(
+        result = self._generate_internal(
             prompt=prompt,
             adapter_name=adapter_name,
             max_tokens=max_tokens,
             temperature=temperature,
             stop=["<|im_end|>"],
         )
+
+        # Log interaction for training data
+        request_id = str(uuid.uuid4())[:8]
+        self._log_interaction(
+            request_id=request_id,
+            messages=messages,
+            response=result["text"],
+            adapter_name=adapter_name,
+            prompt_tokens=result["prompt_tokens"],
+            completion_tokens=result["completion_tokens"],
+            temperature=temperature,
+            max_tokens=max_tokens,
+            finish_reason=result["finish_reason"],
+        )
+
+        return result
 
     @modal.method()
     def generate(
