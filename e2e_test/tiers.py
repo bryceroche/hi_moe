@@ -8,6 +8,13 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Optional, Union
 
+from .dispatcher_schema import (
+    DispatcherPlan,
+    Step,
+    get_dispatcher_plan,
+    VALID_SPECIALISTS,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -85,6 +92,18 @@ class MockLLMClient:
         for m in messages:
             if m.get("role") == "system":
                 system_content = m.get("content", "").lower()
+
+        # Dispatcher structured output request (hi_moe-4dy)
+        if "task dispatcher" in system_content and "json" in system_content:
+            # Return structured plan based on task content
+            if "two sum" in all_content or "add up to target" in all_content:
+                return '{"steps": [{"description": "Implement two sum using hash map for O(n) lookup", "specialist": "python"}]}'
+            if "parentheses" in all_content or "brackets" in all_content:
+                return '{"steps": [{"description": "Implement bracket matching using a stack", "specialist": "python"}]}'
+            if "math" in all_content or "algorithm" in all_content:
+                return '{"steps": [{"description": "Analyze algorithmic approach", "specialist": "math"}, {"description": "Implement solution", "specialist": "python"}]}'
+            # Generic single-step plan
+            return '{"steps": [{"description": "Implement the solution", "specialist": "python"}]}'
 
         # Planning request (system prompt mentions planner)
         if "planner" in system_content or "break down" in system_content:
@@ -220,24 +239,108 @@ Focus on the algorithm approach and implementation strategy."""
 
 
 class RoutingDispatcher:
-    """Tier 2: Route tasks to appropriate specialists."""
+    """Tier 2: Route tasks to appropriate specialists.
 
-    def __init__(self, fleet: "SpecializedFleet"):
+    v0.1: Uses structured output via prompt enforcement (hi_moe-4dy).
+    Produces linear sequence of steps, executes sequentially.
+    """
+
+    def __init__(self, fleet: "SpecializedFleet", llm: LLMClient | None = None):
         self.fleet = fleet
+        self.llm = llm  # Optional: for structured plan generation
 
     async def execute(self, task: Task) -> Outcome:
         """Route task to specialist and execute."""
         logger.info(f"[Dispatcher] Routing task: {task.task_id}")
 
-        # For e2e test, route to python specialist
+        # If LLM available, use structured output for planning
+        if self.llm:
+            try:
+                return await self._execute_with_plan(task)
+            except ValueError as e:
+                logger.warning(f"[Dispatcher] Structured planning failed: {e}")
+                logger.info("[Dispatcher] Falling back to heuristic routing")
+                # Fall through to heuristic routing
+
+        # Fallback: heuristic-based routing (original behavior)
         specialist = self._select_specialist(task)
         logger.info(f"[Dispatcher] Selected specialist: {specialist}")
-
-        # Delegate to Fleet
         return await self.fleet.execute(task, specialist)
 
+    async def _execute_with_plan(self, task: Task) -> Outcome:
+        """Execute task using LLM-generated structured plan.
+
+        Implements linear sequence execution (hi_moe-d87).
+        """
+        # Get structured plan from LLM
+        plan = await get_dispatcher_plan(
+            self.llm,
+            objective=task.objective,
+            context=task.context,
+            max_retries=1,
+        )
+
+        logger.info(f"[Dispatcher] Got plan with {len(plan.steps)} steps")
+
+        # Execute steps sequentially
+        all_results = []
+        for i, step in enumerate(plan.steps):
+            logger.info(
+                f"[Dispatcher] Step {i + 1}/{len(plan.steps)}: "
+                f"{step.description} -> {step.specialist}"
+            )
+
+            # Create subtask for this step
+            step_task = Task(
+                task_id=f"{task.task_id}-step{i + 1}",
+                objective=step.description,
+                context={
+                    **task.context,
+                    "step_number": i + 1,
+                    "total_steps": len(plan.steps),
+                    "previous_results": all_results,
+                },
+                constraints=task.constraints,
+            )
+
+            # Execute with designated specialist
+            outcome = await self.fleet.execute(step_task, step.specialist)
+            all_results.append({
+                "step": i + 1,
+                "description": step.description,
+                "specialist": step.specialist,
+                "status": outcome.status.value,
+                "result": outcome.result,
+            })
+
+            # Stop on failure (re-plan would happen at higher tier)
+            if outcome.status == TaskStatus.FAILED:
+                logger.warning(f"[Dispatcher] Step {i + 1} failed, stopping execution")
+                return Outcome(
+                    task_id=task.task_id,
+                    status=TaskStatus.FAILED,
+                    error=f"Step {i + 1} failed: {outcome.error}",
+                    result={"completed_steps": all_results},
+                    metadata={"plan": [{"description": s.description, "specialist": s.specialist} for s in plan.steps]},
+                )
+
+        # All steps completed
+        logger.info(f"[Dispatcher] All {len(plan.steps)} steps completed")
+
+        # Return final step's result as the outcome
+        final_result = all_results[-1] if all_results else None
+        return Outcome(
+            task_id=task.task_id,
+            status=TaskStatus.COMPLETED,
+            result=final_result.get("result") if final_result else None,
+            metadata={
+                "plan": [{"description": s.description, "specialist": s.specialist} for s in plan.steps],
+                "all_steps": all_results,
+            },
+        )
+
     def _select_specialist(self, task: Task) -> str:
-        """Select specialist based on task content."""
+        """Select specialist based on task content (heuristic fallback)."""
         objective_lower = task.objective.lower()
 
         if any(
