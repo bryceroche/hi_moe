@@ -191,9 +191,9 @@ class TestRunnerWithLogging:
         with open(traj_file) as f:
             lines = [json.loads(line) for line in f]
 
-        # First line should be metadata
+        # First line should be run start (hi_moe-iz9 format)
         metadata = lines[0]
-        assert metadata["type"] == "run_metadata"
+        assert metadata["type"] == "run_start"
         assert metadata["run_id"] == result.run_id
         assert metadata["problem_id"] == "log-test"
 

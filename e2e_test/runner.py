@@ -35,6 +35,12 @@ from .tiers import (
     Task,
     TaskStatus,
 )
+from .trajectory_logger import (
+    TrajectoryLogger,
+    LoggingLLMClient,
+    VLLMCallRecord,
+    create_logging_client,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +118,7 @@ class Runner:
     2. Orchestrates tier execution
     3. Manages state via TaskContext
     4. Handles retries and re-planning
-    5. Optionally logs trajectories for training data
+    5. Optionally logs trajectories for training data (hi_moe-iz9)
     """
 
     def __init__(
@@ -121,27 +127,39 @@ class Runner:
         retry_config: RetryConfig | None = None,
         log_dir: Path | str | None = None,
         code_runner: Callable[[str, list], dict] | None = None,
+        enable_trajectory_logging: bool = True,
     ):
         """Initialize the Runner.
 
         Args:
             llm: LLM client for tier inference
             retry_config: Configuration for retry logic
-            log_dir: Directory for trajectory logs (None = no logging)
+            log_dir: Directory for trajectory logs (None = default ./runs)
             code_runner: Optional code execution function
+            enable_trajectory_logging: Enable detailed vLLM call logging (hi_moe-iz9)
         """
-        self.llm = llm
         self.retry_config = retry_config or RetryConfig()
-        self.log_dir = Path(log_dir) if log_dir else None
+        self.log_dir = Path(log_dir) if log_dir else Path("./runs")
         self.code_runner = code_runner
+        self.enable_trajectory_logging = enable_trajectory_logging
 
-        # Initialize tiers
-        self.fleet = SpecializedFleet(llm)
-        self.dispatcher = RoutingDispatcher(self.fleet, llm)
-        self.architect = AbstractArchitect(self.dispatcher, llm)
+        # Set up trajectory logging if enabled
+        self.trajectory_logger: TrajectoryLogger | None = None
+        if enable_trajectory_logging:
+            self.trajectory_logger = TrajectoryLogger(self.log_dir)
+            # Wrap LLM client to log all calls
+            self.llm = LoggingLLMClient(llm, self.trajectory_logger)
+            logger.info(f"[Runner] Trajectory logging enabled, writing to {self.log_dir}")
+        else:
+            self.llm = llm
+
+        # Initialize tiers with (potentially wrapped) LLM
+        self.fleet = SpecializedFleet(self.llm)
+        self.dispatcher = RoutingDispatcher(self.fleet, self.llm)
+        self.architect = AbstractArchitect(self.dispatcher, self.llm)
         self.monitor = ProgressMonitor(self.architect)
 
-        # Current run state
+        # Current run state (legacy, for backward compatibility)
         self._trajectory: list[dict] = []
 
     async def run(self, problem: dict) -> RunResult:
@@ -158,6 +176,16 @@ class Runner:
         self._trajectory = []
 
         start_time = time.monotonic()
+
+        # Start trajectory logging for this run (hi_moe-iz9)
+        if self.trajectory_logger:
+            self.trajectory_logger.start_run(run_id, {
+                "problem_id": problem.get("id"),
+                "problem_title": problem.get("title"),
+            })
+            # Set context for LLM call logging
+            if isinstance(self.llm, LoggingLLMClient):
+                self.llm.set_context(task_id=run_id)
 
         # Store problem in context
         context.set("problem", problem)
@@ -224,8 +252,17 @@ class Runner:
                 elapsed_ms=elapsed_ms,
             )
 
-        # Log trajectory if configured
-        if self.log_dir:
+        # End trajectory logging (hi_moe-iz9)
+        if self.trajectory_logger:
+            self.trajectory_logger.end_run({
+                "status": result.status.value,
+                "elapsed_ms": result.elapsed_ms,
+                "validation": result.validation,
+                "error": result.error,
+            })
+
+        # Log legacy trajectory if configured (deprecated, use trajectory_logger)
+        if self.log_dir and not self.trajectory_logger:
             self._save_trajectory(run_id, result)
 
         logger.info(
@@ -397,6 +434,7 @@ async def create_runner(
     endpoint: str | None = None,
     mock: bool = False,
     log_dir: str | None = None,
+    enable_trajectory_logging: bool = True,
 ) -> Runner:
     """Factory function to create a Runner with appropriate LLM client.
 
@@ -404,6 +442,7 @@ async def create_runner(
         endpoint: Modal vLLM endpoint URL (ignored if mock=True)
         mock: Use mock LLM for testing
         log_dir: Directory for trajectory logs
+        enable_trajectory_logging: Enable detailed vLLM call logging (hi_moe-iz9)
 
     Returns:
         Configured Runner instance
@@ -418,4 +457,5 @@ async def create_runner(
     return Runner(
         llm=llm,
         log_dir=log_dir,
+        enable_trajectory_logging=enable_trajectory_logging,
     )
