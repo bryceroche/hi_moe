@@ -42,7 +42,7 @@ SPECIALIST_TYPES = {
         ADAPTERS_PATH: adapter_volume,
     },
     timeout=86400,  # 24 hours max
-    secrets=[modal.Secret.from_name("huggingface")],
+    # HuggingFace secret optional for public models like QwQ
 )
 def train_lora(
     adapter_name: str,

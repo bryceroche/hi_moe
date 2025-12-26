@@ -53,18 +53,36 @@ class Outcome:
 
 
 class LLMClient:
-    """Client for Modal-hosted vLLM."""
+    """Client for Modal-hosted vLLM with adapter support."""
 
     def __init__(self, endpoint: str):
         self.endpoint = endpoint.rstrip("/")
+        self._available_adapters: list[str] | None = None
+
+    async def get_available_adapters(self) -> list[str]:
+        """Fetch list of available adapters from the server."""
+        if self._available_adapters is not None:
+            return self._available_adapters
+
+        import httpx
+        async with httpx.AsyncClient() as client:
+            try:
+                resp = await client.get(f"{self.endpoint}/v1/models", timeout=10)
+                data = resp.json()
+                self._available_adapters = [m["id"] for m in data.get("data", [])]
+            except Exception:
+                self._available_adapters = ["base"]
+
+        return self._available_adapters
 
     async def generate(
         self,
         messages: list[dict],
         temperature: float = 0.3,
         max_tokens: int = 2048,
+        adapter: str | None = None,
     ) -> str:
-        """Generate completion from LLM."""
+        """Generate completion from LLM with optional adapter."""
         from openai import AsyncOpenAI
 
         client = AsyncOpenAI(
@@ -72,8 +90,11 @@ class LLMClient:
             api_key="not-needed",
         )
 
+        # Use adapter if specified, otherwise base
+        model = adapter if adapter else "base"
+
         response = await client.chat.completions.create(
-            model="base",  # Use base model for now
+            model=model,
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
@@ -85,7 +106,11 @@ class LLMClient:
 class MockLLMClient:
     """Mock LLM for local testing without Modal."""
 
-    async def generate(self, messages: list[dict], **kwargs) -> str:
+    async def get_available_adapters(self) -> list[str]:
+        """Return mock list of adapters."""
+        return ["base", "python-test"]
+
+    async def generate(self, messages: list[dict], adapter: str | None = None, **kwargs) -> str:
         """Return pre-defined responses for testing."""
         # Combine all message content for context
         all_content = " ".join(m.get("content", "").lower() for m in messages)
@@ -450,7 +475,17 @@ class RoutingDispatcher:
 
 
 class SpecializedFleet:
-    """Tier 3: Execute tasks with specialist capabilities."""
+    """Tier 3: Execute tasks with specialist capabilities.
+
+    Maps specialist types to LoRA adapters when available.
+    """
+
+    # Map specialist types to adapter name patterns
+    SPECIALIST_TO_ADAPTER = {
+        "python": ["python", "code", "programming"],
+        "math": ["math", "reasoning"],
+        "algorithms": ["algorithm", "algo"],
+    }
 
     def __init__(
         self,
@@ -459,10 +494,37 @@ class SpecializedFleet:
     ):
         self.llm = llm
         self.trajectory_logger = trajectory_logger
+        self._adapter_cache: dict[str, str | None] = {}
+
+    async def _get_adapter_for_specialist(self, specialist: str) -> str | None:
+        """Find best matching adapter for a specialist type."""
+        if specialist in self._adapter_cache:
+            return self._adapter_cache[specialist]
+
+        # Get available adapters from server
+        available = await self.llm.get_available_adapters()
+        available_lower = {a.lower(): a for a in available if a != "base"}
+
+        # Find matching adapter
+        patterns = self.SPECIALIST_TO_ADAPTER.get(specialist, [specialist])
+        for pattern in patterns:
+            for adapter_lower, adapter_name in available_lower.items():
+                if pattern in adapter_lower:
+                    self._adapter_cache[specialist] = adapter_name
+                    logger.info(f"[Fleet] Mapped specialist '{specialist}' -> adapter '{adapter_name}'")
+                    return adapter_name
+
+        # No matching adapter found
+        self._adapter_cache[specialist] = None
+        logger.info(f"[Fleet] No adapter found for specialist '{specialist}', using base model")
+        return None
 
     async def execute(self, task: Task, specialist: str) -> Outcome:
         """Execute task with specified specialist."""
-        logger.info(f"[Fleet] Executing with {specialist} specialist")
+        # Find matching adapter for this specialist
+        adapter = await self._get_adapter_for_specialist(specialist)
+        adapter_info = f" (adapter: {adapter})" if adapter else " (base model)"
+        logger.info(f"[Fleet] Executing with {specialist} specialist{adapter_info}")
 
         prompt = self._create_execution_prompt(task, specialist)
         system_prompt = self._get_system_prompt(specialist)
@@ -475,6 +537,7 @@ class SpecializedFleet:
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.2,
+                adapter=adapter,
             )
 
             execution_time_ms = (time.monotonic() - start_time) * 1000
@@ -486,7 +549,7 @@ class SpecializedFleet:
                 task_id=task.task_id,
                 status=TaskStatus.COMPLETED,
                 result={"code": code, "raw_response": response},
-                metadata={"specialist": specialist},
+                metadata={"specialist": specialist, "adapter": adapter},
             )
 
             # Log fleet execution (hi_moe-r8q)
@@ -502,7 +565,7 @@ class SpecializedFleet:
                     output_raw=response[:2000] if len(response) > 2000 else response,
                     execution_time_ms=execution_time_ms,
                     status="success",
-                    metadata={"context": task.context},
+                    metadata={"context": task.context, "adapter": adapter},
                 )
                 self.trajectory_logger.log_fleet(fleet_record)
 
