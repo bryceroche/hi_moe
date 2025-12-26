@@ -153,10 +153,10 @@ class Runner:
         else:
             self.llm = llm
 
-        # Initialize tiers with (potentially wrapped) LLM
-        self.fleet = SpecializedFleet(self.llm)
-        self.dispatcher = RoutingDispatcher(self.fleet, self.llm)
-        self.architect = AbstractArchitect(self.dispatcher, self.llm)
+        # Initialize tiers with (potentially wrapped) LLM and trajectory logger (hi_moe-r8q)
+        self.fleet = SpecializedFleet(self.llm, trajectory_logger=self.trajectory_logger)
+        self.dispatcher = RoutingDispatcher(self.fleet, self.llm, trajectory_logger=self.trajectory_logger)
+        self.architect = AbstractArchitect(self.dispatcher, self.llm, trajectory_logger=self.trajectory_logger)
         self.monitor = ProgressMonitor(self.architect)
 
         # Current run state (legacy, for backward compatibility)

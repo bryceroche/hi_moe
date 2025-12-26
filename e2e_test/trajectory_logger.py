@@ -54,6 +54,88 @@ class VLLMCallRecord:
         return {k: v for k, v in asdict(self).items() if v is not None}
 
 
+# Tier-specific records for training data collection (hi_moe-r8q)
+
+
+@dataclass
+class ArchitectRecord:
+    """Record of Architect tier decision.
+
+    Captures: goal, delegation, success criteria, revisions.
+    Used for training coordination strategies.
+    """
+
+    ts: str  # ISO timestamp
+    task_id: str
+    goal: str  # What the Architect is trying to achieve
+    delegation: dict | None = None  # Task delegated to Dispatcher
+    success_criteria: list[str] | None = None  # How success is measured
+    plan: str | None = None  # Generated execution plan
+    revision_of: str | None = None  # If this is a revision, ID of original
+    revision_reason: str | None = None  # Why revision was needed
+    outcome_status: str | None = None  # completed/failed after execution
+    outcome_summary: str | None = None  # Brief description of result
+    metadata: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        d = {"type": "architect_decision", **asdict(self)}
+        return {k: v for k, v in d.items() if v is not None}
+
+
+@dataclass
+class DispatcherRecord:
+    """Record of Dispatcher tier routing decision.
+
+    Captures: task, routing decision, rationale, specialist selection.
+    Used for training routing LoRA.
+    """
+
+    ts: str  # ISO timestamp
+    task_id: str
+    task_objective: str  # What needs to be done
+    routing_decision: str  # "structured_plan" or "heuristic"
+    plan_steps: list[dict] | None = None  # Structured plan if used
+    rationale: str | None = None  # Why this routing was chosen
+    specialist: str | None = None  # Single specialist if heuristic
+    context_summary: str | None = None  # Relevant context for decision
+    outcome_status: str | None = None  # completed/failed
+    outcome_error: str | None = None  # Error if failed
+    metadata: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        d = {"type": "dispatcher_routing", **asdict(self)}
+        return {k: v for k, v in d.items() if v is not None}
+
+
+@dataclass
+class FleetRecord:
+    """Record of Fleet tier execution.
+
+    Captures: task, specialist, output, result.
+    Used for training specialist LoRAs.
+    """
+
+    ts: str  # ISO timestamp
+    task_id: str
+    task_objective: str  # What the specialist was asked to do
+    specialist: str  # Which specialist executed (python, math, etc.)
+    prompt_used: str | None = None  # System prompt given to specialist
+    output_code: str | None = None  # Generated code
+    output_raw: str | None = None  # Raw LLM response
+    execution_time_ms: float = 0
+    status: str = "success"  # success, error
+    error: str | None = None
+    validation_result: dict | None = None  # If code was validated
+    metadata: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        d = {"type": "fleet_execution", **asdict(self)}
+        return {k: v for k, v in d.items() if v is not None}
+
+
 class TrajectoryLogger:
     """Logs vLLM call trajectories to JSONL files.
 
@@ -118,6 +200,42 @@ class TrajectoryLogger:
 
         self._call_count += 1
         self._write_record({"type": "vllm_call", **record.to_dict()})
+
+    def log_architect(self, record: ArchitectRecord) -> None:
+        """Log an Architect tier decision.
+
+        Args:
+            record: The architect decision record
+        """
+        if not self._current_file:
+            logger.warning("[TrajectoryLogger] No active run, architect record not logged")
+            return
+
+        self._write_record(record.to_dict())
+
+    def log_dispatcher(self, record: DispatcherRecord) -> None:
+        """Log a Dispatcher tier routing decision.
+
+        Args:
+            record: The dispatcher routing record
+        """
+        if not self._current_file:
+            logger.warning("[TrajectoryLogger] No active run, dispatcher record not logged")
+            return
+
+        self._write_record(record.to_dict())
+
+    def log_fleet(self, record: FleetRecord) -> None:
+        """Log a Fleet tier execution.
+
+        Args:
+            record: The fleet execution record
+        """
+        if not self._current_file:
+            logger.warning("[TrajectoryLogger] No active run, fleet record not logged")
+            return
+
+        self._write_record(record.to_dict())
 
     def end_run(self, result: dict | None = None) -> None:
         """End the current run trajectory.
@@ -405,3 +523,146 @@ def compute_trajectory_stats(records: list[dict]) -> dict:
         "avg_latency_ms": total_latency / len(calls) if calls else 0,
         "calls_by_tier": tier_counts,
     }
+
+
+# Tier-specific analysis utilities (hi_moe-r8q)
+
+
+def filter_architect_records(records: list[dict]) -> list[dict]:
+    """Filter to only Architect tier decision records.
+
+    Args:
+        records: All trajectory records
+
+    Returns:
+        Only architect decision records
+    """
+    return [r for r in records if r.get("type") == "architect_decision"]
+
+
+def filter_dispatcher_records(records: list[dict]) -> list[dict]:
+    """Filter to only Dispatcher tier routing records.
+
+    Args:
+        records: All trajectory records
+
+    Returns:
+        Only dispatcher routing records
+    """
+    return [r for r in records if r.get("type") == "dispatcher_routing"]
+
+
+def filter_fleet_records(records: list[dict]) -> list[dict]:
+    """Filter to only Fleet tier execution records.
+
+    Args:
+        records: All trajectory records
+
+    Returns:
+        Only fleet execution records
+    """
+    return [r for r in records if r.get("type") == "fleet_execution"]
+
+
+def compute_tier_stats(records: list[dict]) -> dict:
+    """Compute statistics for tier-specific training data.
+
+    Args:
+        records: Trajectory records
+
+    Returns:
+        Statistics dict with per-tier counts and success rates
+    """
+    architect = filter_architect_records(records)
+    dispatcher = filter_dispatcher_records(records)
+    fleet = filter_fleet_records(records)
+
+    def success_rate(recs: list[dict]) -> float:
+        if not recs:
+            return 0.0
+        successful = sum(1 for r in recs if r.get("outcome_status") == "completed"
+                        or r.get("status") == "success")
+        return successful / len(recs)
+
+    # Routing decision breakdown
+    structured_routing = sum(1 for r in dispatcher if r.get("routing_decision") == "structured_plan")
+    heuristic_routing = sum(1 for r in dispatcher if r.get("routing_decision") == "heuristic")
+
+    # Specialist usage
+    specialist_counts = {}
+    for r in fleet:
+        spec = r.get("specialist", "unknown")
+        specialist_counts[spec] = specialist_counts.get(spec, 0) + 1
+
+    return {
+        "architect_decisions": len(architect),
+        "architect_success_rate": success_rate(architect),
+        "dispatcher_routings": len(dispatcher),
+        "dispatcher_success_rate": success_rate(dispatcher),
+        "structured_routing_count": structured_routing,
+        "heuristic_routing_count": heuristic_routing,
+        "fleet_executions": len(fleet),
+        "fleet_success_rate": success_rate(fleet),
+        "specialist_usage": specialist_counts,
+    }
+
+
+def extract_training_pairs(records: list[dict], tier: str) -> list[dict]:
+    """Extract input/output pairs for training from tier records.
+
+    Args:
+        records: Trajectory records
+        tier: Which tier to extract ("architect", "dispatcher", "fleet")
+
+    Returns:
+        List of training pairs with input context and expected output
+    """
+    pairs = []
+
+    if tier == "architect":
+        for r in filter_architect_records(records):
+            if r.get("outcome_status") == "completed":
+                pairs.append({
+                    "input": {
+                        "goal": r.get("goal"),
+                        "context": r.get("metadata", {}).get("context"),
+                    },
+                    "output": {
+                        "plan": r.get("plan"),
+                        "delegation": r.get("delegation"),
+                        "success_criteria": r.get("success_criteria"),
+                    },
+                    "outcome": r.get("outcome_summary"),
+                })
+
+    elif tier == "dispatcher":
+        for r in filter_dispatcher_records(records):
+            if r.get("outcome_status") == "completed":
+                pairs.append({
+                    "input": {
+                        "task": r.get("task_objective"),
+                        "context": r.get("context_summary"),
+                    },
+                    "output": {
+                        "routing_decision": r.get("routing_decision"),
+                        "plan_steps": r.get("plan_steps"),
+                        "rationale": r.get("rationale"),
+                    },
+                })
+
+    elif tier == "fleet":
+        for r in filter_fleet_records(records):
+            if r.get("status") == "success":
+                pairs.append({
+                    "input": {
+                        "task": r.get("task_objective"),
+                        "specialist": r.get("specialist"),
+                        "prompt": r.get("prompt_used"),
+                    },
+                    "output": {
+                        "code": r.get("output_code"),
+                    },
+                    "validation": r.get("validation_result"),
+                })
+
+    return pairs
