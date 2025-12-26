@@ -84,6 +84,167 @@ def prepare_mbpp_dataset(max_samples: int = 500) -> dict:
 @app.function(
     image=prep_image,
     volumes={DATA_PATH: data_volume},
+    timeout=1800,
+)
+def prepare_gsm8k_dataset(max_samples: int = 500) -> dict:
+    """Download and format GSM8K (Grade School Math 8K) for training.
+
+    GSM8K contains ~8K grade school math word problems with step-by-step solutions.
+    """
+    import json
+    import os
+    import re
+    from datasets import load_dataset
+
+    print("Downloading GSM8K dataset...")
+    dataset = load_dataset("openai/gsm8k", "main", split="train")
+
+    os.makedirs(DATA_PATH, exist_ok=True)
+
+    train_data = []
+    eval_data = []
+
+    for i, example in enumerate(dataset):
+        if i >= max_samples:
+            break
+
+        # GSM8K has 'question' and 'answer' fields
+        # Answer contains step-by-step reasoning ending with "#### <final_answer>"
+        question = example["question"]
+        answer = example["answer"]
+
+        # Extract the final numeric answer
+        final_match = re.search(r"####\s*([\d,.-]+)", answer)
+        final_answer = final_match.group(1).replace(",", "") if final_match else ""
+
+        # Extract reasoning (everything before ####)
+        reasoning = re.sub(r"####.*$", "", answer).strip()
+
+        # Format for training
+        entry = {
+            "domain": "math",
+            "problem": question,
+            "reasoning": reasoning,
+            "solution": f"The answer is {final_answer}",
+        }
+
+        # 90/10 train/eval split
+        if i % 10 == 0:
+            eval_data.append(entry)
+        else:
+            train_data.append(entry)
+
+    # Write files
+    train_file = f"{DATA_PATH}/math_train.jsonl"
+    eval_file = f"{DATA_PATH}/math_eval.jsonl"
+
+    with open(train_file, "w") as f:
+        for entry in train_data:
+            f.write(json.dumps(entry) + "\n")
+
+    with open(eval_file, "w") as f:
+        for entry in eval_data:
+            f.write(json.dumps(entry) + "\n")
+
+    # Commit volume
+    data_volume.commit()
+
+    print(f"Created {len(train_data)} training examples")
+    print(f"Created {len(eval_data)} eval examples")
+    print(f"Files: {train_file}, {eval_file}")
+
+    return {
+        "train_samples": len(train_data),
+        "eval_samples": len(eval_data),
+        "train_file": "math_train.jsonl",
+        "eval_file": "math_eval.jsonl",
+    }
+
+
+@app.function(
+    image=prep_image,
+    volumes={DATA_PATH: data_volume},
+    timeout=1800,
+)
+def prepare_code_contests_dataset(max_samples: int = 200) -> dict:
+    """Download and format CodeContests for algorithm training.
+
+    CodeContests contains competitive programming problems with solutions.
+    """
+    import json
+    import os
+    from datasets import load_dataset
+
+    print("Downloading CodeContests dataset...")
+    # Use the valid split which has solutions
+    dataset = load_dataset("deepmind/code_contests", split="valid")
+
+    os.makedirs(DATA_PATH, exist_ok=True)
+
+    train_data = []
+    eval_data = []
+
+    for i, example in enumerate(dataset):
+        if i >= max_samples:
+            break
+
+        # Get problem description
+        problem = example["description"]
+
+        # Get Python solutions if available
+        python_solutions = example.get("solutions", {}).get("python3", [])
+        if not python_solutions:
+            python_solutions = example.get("solutions", {}).get("python", [])
+
+        if not python_solutions:
+            continue  # Skip if no Python solution
+
+        solution = python_solutions[0]  # Take first solution
+
+        # Format for training
+        entry = {
+            "domain": "algorithms",
+            "problem": problem[:2000],  # Truncate long problems
+            "reasoning": f"This is a competitive programming problem. Let me analyze the requirements and implement an efficient solution.",
+            "solution": solution,
+        }
+
+        # 90/10 train/eval split
+        if i % 10 == 0:
+            eval_data.append(entry)
+        else:
+            train_data.append(entry)
+
+    # Write files
+    train_file = f"{DATA_PATH}/algorithms_train.jsonl"
+    eval_file = f"{DATA_PATH}/algorithms_eval.jsonl"
+
+    with open(train_file, "w") as f:
+        for entry in train_data:
+            f.write(json.dumps(entry) + "\n")
+
+    with open(eval_file, "w") as f:
+        for entry in eval_data:
+            f.write(json.dumps(entry) + "\n")
+
+    # Commit volume
+    data_volume.commit()
+
+    print(f"Created {len(train_data)} training examples")
+    print(f"Created {len(eval_data)} eval examples")
+    print(f"Files: {train_file}, {eval_file}")
+
+    return {
+        "train_samples": len(train_data),
+        "eval_samples": len(eval_data),
+        "train_file": "algorithms_train.jsonl",
+        "eval_file": "algorithms_eval.jsonl",
+    }
+
+
+@app.function(
+    image=prep_image,
+    volumes={DATA_PATH: data_volume},
 )
 def list_data_files() -> list[dict]:
     """List files in the data volume."""
@@ -122,23 +283,54 @@ def preview_data(filename: str, n: int = 3) -> list[dict]:
 
 
 @app.local_entrypoint()
-def main(action: str = "prepare", max_samples: int = 500):
+def main(action: str = "prepare", dataset: str = "python", max_samples: int = 500):
     """Prepare training data.
 
     Actions:
-        prepare: Download and format MBPP dataset
+        prepare: Download and format a dataset
         list: List files in data volume
         preview: Preview data file contents
+        all: Prepare all datasets
+
+    Datasets:
+        python: MBPP Python problems
+        math: GSM8K math word problems
+        algorithms: CodeContests competitive programming
 
     Examples:
-        modal run modal_app/data_prep.py --action=prepare --max-samples=100
+        modal run modal_app/data_prep.py --action=prepare --dataset=python --max-samples=100
+        modal run modal_app/data_prep.py --action=prepare --dataset=math
+        modal run modal_app/data_prep.py --action=prepare --dataset=algorithms
+        modal run modal_app/data_prep.py --action=all
         modal run modal_app/data_prep.py --action=list
     """
     if action == "prepare":
-        result = prepare_mbpp_dataset.remote(max_samples)
+        if dataset == "python":
+            result = prepare_mbpp_dataset.remote(max_samples)
+        elif dataset == "math":
+            result = prepare_gsm8k_dataset.remote(max_samples)
+        elif dataset == "algorithms":
+            result = prepare_code_contests_dataset.remote(max_samples)
+        else:
+            print(f"Unknown dataset: {dataset}")
+            print("Available: python, math, algorithms")
+            return
+
         print(f"\nDataset prepared:")
         print(f"  Train: {result['train_samples']} samples -> {result['train_file']}")
         print(f"  Eval: {result['eval_samples']} samples -> {result['eval_file']}")
+
+    elif action == "all":
+        print("Preparing all datasets...")
+        for ds_name, prep_fn in [
+            ("python", prepare_mbpp_dataset),
+            ("math", prepare_gsm8k_dataset),
+            ("algorithms", prepare_code_contests_dataset),
+        ]:
+            print(f"\n--- {ds_name.upper()} ---")
+            result = prep_fn.remote(max_samples)
+            print(f"  Train: {result['train_samples']} samples -> {result['train_file']}")
+            print(f"  Eval: {result['eval_samples']} samples -> {result['eval_file']}")
 
     elif action == "list":
         files = list_data_files.remote()
@@ -159,3 +351,4 @@ def main(action: str = "prepare", max_samples: int = 500):
 
     else:
         print(f"Unknown action: {action}")
+        print("Valid actions: prepare, all, list, preview")

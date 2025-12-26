@@ -483,8 +483,11 @@ class SpecializedFleet:
     # Map specialist types to adapter name patterns
     SPECIALIST_TO_ADAPTER = {
         "python": ["python", "code", "programming"],
-        "math": ["math", "reasoning"],
-        "algorithms": ["algorithm", "algo"],
+        "math": ["math", "reasoning", "gsm"],
+        "algorithms": ["algorithm", "algo", "contest", "competitive"],
+        "data_structures": ["data", "struct", "ds"],
+        "debugging": ["debug", "fix", "bug"],
+        "refactoring": ["refactor", "clean", "improve"],
     }
 
     def __init__(
@@ -599,7 +602,11 @@ class SpecializedFleet:
     def _get_system_prompt(self, specialist: str) -> str:
         prompts = {
             "python": "You are a Python programming expert. Write clean, efficient, working code. Only output the code, no explanations.",
-            "math": "You are a mathematical reasoning expert. Solve problems step by step, then provide working code.",
+            "math": "You are a mathematical reasoning expert. Solve problems step by step with clear calculations, then provide the final answer.",
+            "algorithms": "You are an algorithms expert specializing in competitive programming. Analyze time/space complexity and implement optimal solutions.",
+            "data_structures": "You are a data structures expert. Choose appropriate data structures and implement efficient operations.",
+            "debugging": "You are a debugging expert. Identify bugs systematically, explain the root cause, and provide the corrected code.",
+            "refactoring": "You are a code refactoring expert. Improve code quality, readability, and maintainability while preserving functionality.",
         }
         return prompts.get(specialist, prompts["python"])
 
