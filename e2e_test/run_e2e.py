@@ -9,8 +9,8 @@ import sys
 from datetime import datetime
 from typing import Union
 
-from test_problems import ALL_PROBLEMS, TEST_PROBLEM
-from tiers import (
+from .test_problems import ALL_PROBLEMS, TEST_PROBLEM
+from .tiers import (
     AbstractArchitect,
     LLMClient,
     MockLLMClient,
@@ -19,7 +19,7 @@ from tiers import (
     SpecializedFleet,
     Task,
 )
-from validator import validate_solution
+from .validator import validate_solution
 
 logging.basicConfig(
     level=logging.INFO,
