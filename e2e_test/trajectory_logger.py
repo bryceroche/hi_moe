@@ -350,6 +350,12 @@ class LoggingLLMClient:
         self._current_specialist = None
         self._current_lora = None
 
+    async def get_available_adapters(self) -> list[str]:
+        """Get available adapters from underlying client."""
+        if hasattr(self.client, "get_available_adapters"):
+            return await self.client.get_available_adapters()
+        return ["base"]
+
     async def generate(
         self,
         messages: list[dict],
