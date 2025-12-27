@@ -515,12 +515,23 @@ class LLMClient:
         max_tokens: int = 2048,
         adapter: str | None = None,
     ) -> str:
-        """Generate completion from LLM with optional adapter."""
+        """Generate completion from LLM with optional adapter.
+
+        Includes mitigations for Modal 303 redirect stalls (hi_moe-56q):
+        - Hard 10-minute total timeout via asyncio
+        - Reduced max_redirects to prevent infinite polling loops
+        - Per-request timeout of 5 minutes
+        """
+        import asyncio
         from openai import AsyncOpenAI
         import httpx
 
-        # 5 minute timeout for long generations (QwQ can be slow)
-        http_client = httpx.AsyncClient(timeout=httpx.Timeout(300.0))
+        # Configure httpx with redirect limits (hi_moe-56q)
+        # Modal returns 303 for async polling - limit to prevent infinite loops
+        http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(300.0),  # 5 min per-request timeout
+            max_redirects=10,  # Reduced from default 20
+        )
         client = AsyncOpenAI(
             base_url=f"{self.endpoint}/v1",
             api_key="not-needed",
@@ -530,14 +541,19 @@ class LLMClient:
         # Use adapter if specified, otherwise base
         model = adapter if adapter else "base"
 
-        response = await client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-
-        return response.choices[0].message.content
+        # Hard total timeout to prevent 27+ min stalls (hi_moe-56q)
+        try:
+            async with asyncio.timeout(600):  # 10 min hard limit
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                return response.choices[0].message.content
+        except asyncio.TimeoutError:
+            logger.error("[LLMClient] Request timed out after 10 minutes (hi_moe-56q)")
+            raise TimeoutError("Modal request timed out after 10 minutes - possible 303 redirect stall")
 
 
 class MockLLMClient:
