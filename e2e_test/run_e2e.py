@@ -190,6 +190,11 @@ async def main():
         action="store_true",
         help="Skip warmup retries (use when container is already warm)",
     )
+    parser.add_argument(
+        "--embedding-routing",
+        action="store_true",
+        help="Enable semantic embedding routing (hi_moe-awf)",
+    )
     args = parser.parse_args()
 
     # Create function-call validator wrapper for test problems (hi_moe-ld8)
@@ -237,6 +242,7 @@ async def main():
         log_dir=args.log_dir,
         code_runner=code_runner,
         enable_trajectory_logging=True,
+        enable_embedding_routing=args.embedding_routing,
     )
 
     logger.info("Runner initialized with tiers: ProgressMonitor -> Architect -> Dispatcher -> Fleet -> CodeRunner")

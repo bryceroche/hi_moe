@@ -28,6 +28,7 @@ from .tiers import (
     AbstractArchitect,
     ArchitectMemory,
     DispatcherMemory,
+    EmbeddingRouter,
     FleetMemory,
     LLMClient,
     MockLLMClient,
@@ -136,6 +137,7 @@ class Runner:
         enable_fast_path: bool = True,
         enable_training_db: bool = True,
         enable_memory_persistence: bool = True,
+        enable_embedding_routing: bool = False,
     ):
         """Initialize the Runner.
 
@@ -147,6 +149,7 @@ class Runner:
             enable_trajectory_logging: Enable detailed vLLM call logging (hi_moe-iz9)
             enable_fast_path: Enable tier-skip for simple problems (hi_moe-00z)
             enable_training_db: Enable SQLite training data logging (hi_moe-828)
+            enable_embedding_routing: Enable semantic embedding routing (hi_moe-awf)
             enable_memory_persistence: Enable persistent agent memory (hi_moe-ycg)
         """
         self.retry_config = retry_config or RetryConfig()
@@ -192,12 +195,22 @@ class Runner:
             code_runner=self.code_runner,
             memory=self.fleet_memory,
         )
+        # Initialize embedding router if enabled (hi_moe-awf)
+        self.embedding_router = None
+        if enable_embedding_routing:
+            try:
+                self.embedding_router = EmbeddingRouter()
+                logger.info("[Runner] Embedding routing enabled (hi_moe-awf)")
+            except ImportError as e:
+                logger.warning(f"[Runner] Embedding routing unavailable: {e}")
+
         self.dispatcher = RoutingDispatcher(
             self.fleet,
             self.llm,
             trajectory_logger=self.trajectory_logger,
             call_db=self.call_db,  # Wire call_db for routing decision logging (hi_moe-ehx)
             memory=self.dispatcher_memory,
+            embedding_router=self.embedding_router,  # Wire embedding router (hi_moe-awf)
         )
         self.architect = AbstractArchitect(self.dispatcher, self.llm, trajectory_logger=self.trajectory_logger)
         self.monitor = ProgressMonitor(self.architect)

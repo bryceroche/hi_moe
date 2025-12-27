@@ -23,6 +23,7 @@ from .outcome_schema import (
     OutcomeEvaluation,
 )
 from .learned_router import LearnedRouter, HybridRouter
+from .embedding_router import EmbeddingRouter, HybridEmbeddingRouter
 
 if TYPE_CHECKING:
     from .trajectory_logger import TrajectoryLogger
@@ -878,6 +879,7 @@ class RoutingDispatcher:
         trajectory_logger: "TrajectoryLogger | None" = None,
         conversation_context: ConversationContext | None = None,
         learned_router: LearnedRouter | None = None,
+        embedding_router: EmbeddingRouter | None = None,
         memory: DispatcherMemory | None = None,
         call_db: "CallDB | None" = None,
     ):
@@ -886,6 +888,7 @@ class RoutingDispatcher:
         self.trajectory_logger = trajectory_logger
         self.conversation_context = conversation_context  # Multi-turn context (hi_moe-ceg)
         self.learned_router = learned_router  # Optional: learned routing (hi_moe-bh3)
+        self.embedding_router = embedding_router  # Optional: embedding routing (hi_moe-awf)
         self.memory = memory or DispatcherMemory()  # Per-run memory (hi_moe-mz5)
         self.call_db = call_db  # Optional: for routing decision logging (hi_moe-ehx)
         self._specialist_rates_cache: dict | None = None  # Cache for session (hi_moe-fsb)
@@ -1208,8 +1211,10 @@ class RoutingDispatcher:
     ) -> tuple[str, str, list[str]]:
         """Select specialist based on task content.
 
-        Uses learned router when available with sufficient confidence,
-        otherwise falls back to heuristic routing (hi_moe-bh3).
+        Priority order (hi_moe-awf, hi_moe-bh3):
+        1. Embedding router (semantic similarity)
+        2. Learned router (ML-based)
+        3. Heuristic routing (keyword matching)
 
         Args:
             task: Task to route
@@ -1217,12 +1222,29 @@ class RoutingDispatcher:
 
         Returns:
             Tuple of (specialist, routing_strategy, routing_signals)
-            - routing_strategy: "learned", "math_first", or "python_direct"
+            - routing_strategy: "embedding", "learned", "math_first", or "python_direct"
             - routing_signals: Keywords/reasons that influenced the decision
         """
         exclude = exclude or []
 
-        # Try learned router first (hi_moe-bh3)
+        # Try embedding router first (hi_moe-awf)
+        if self.embedding_router:
+            try:
+                specialist, scores, reasoning = self.embedding_router.predict(
+                    task.objective, task.context, exclude
+                )
+                if specialist is not None:
+                    routing_signals = [f"embedding:{reasoning}"]
+                    for name, score in scores.items():
+                        routing_signals.append(f"sim:{name}={score:.2f}")
+                    logger.info(f"[Dispatcher] Embedding routing: {specialist} ({reasoning})")
+                    return specialist, "embedding", routing_signals
+                else:
+                    logger.info(f"[Dispatcher] Embedding router deferred: {reasoning}")
+            except Exception as e:
+                logger.warning(f"[Dispatcher] Embedding router error: {e}")
+
+        # Try learned router second (hi_moe-bh3)
         if self.learned_router:
             specialist, scores, reasoning = self.learned_router.predict(
                 task.objective, task.context, exclude
@@ -1316,7 +1338,7 @@ class RoutingDispatcher:
     def _record_outcome(
         self, task: Task, outcome: Outcome, specialist: str
     ) -> None:
-        """Record outcome for future routing (hi_moe-ceg, hi_moe-bh3, hi_moe-mz5)."""
+        """Record outcome for future routing (hi_moe-ceg, hi_moe-bh3, hi_moe-mz5, hi_moe-awf)."""
         # Extract code from outcome if available (hi_moe-qwo)
         code = None
         if isinstance(outcome.result, FleetResult):
@@ -1340,6 +1362,19 @@ class RoutingDispatcher:
                 f"[Dispatcher] Recorded outcome for {specialist}: "
                 f"{self.conversation_context.get_context_summary()}"
             )
+
+        # Record to embedding router for prototype learning (hi_moe-awf)
+        if self.embedding_router:
+            try:
+                self.embedding_router.record_outcome(
+                    task_id=task.task_id,
+                    objective=task.objective,
+                    context=task.context,
+                    specialist=specialist,
+                    success=success,
+                )
+            except Exception as e:
+                logger.warning(f"[Dispatcher] Embedding router record error: {e}")
 
         # Record to learned router for online learning (hi_moe-bh3)
         if self.learned_router:
