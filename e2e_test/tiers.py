@@ -22,6 +22,7 @@ from .outcome_schema import (
     ValidationSummary,
     OutcomeEvaluation,
 )
+from .learned_router import LearnedRouter, HybridRouter
 
 if TYPE_CHECKING:
     from .trajectory_logger import TrajectoryLogger
@@ -593,6 +594,7 @@ class RoutingDispatcher:
     v0.1: Uses structured output via prompt enforcement (hi_moe-4dy).
     Produces linear sequence of steps, executes sequentially.
     Supports multi-turn context for specialist preference (hi_moe-ceg).
+    Supports learned routing with heuristic fallback (hi_moe-bh3).
     """
 
     def __init__(
@@ -601,11 +603,13 @@ class RoutingDispatcher:
         llm: LLMClient | None = None,
         trajectory_logger: "TrajectoryLogger | None" = None,
         conversation_context: ConversationContext | None = None,
+        learned_router: LearnedRouter | None = None,
     ):
         self.fleet = fleet
         self.llm = llm  # Optional: for structured plan generation
         self.trajectory_logger = trajectory_logger
         self.conversation_context = conversation_context  # Multi-turn context (hi_moe-ceg)
+        self.learned_router = learned_router  # Optional: learned routing (hi_moe-bh3)
 
     async def execute(self, task: Task) -> Outcome:
         """Route task to specialist and execute with retry logic (hi_moe-a4w)."""
@@ -762,6 +766,9 @@ class RoutingDispatcher:
                 "result": outcome.result,
             })
 
+            # Record step outcome for learned router (hi_moe-bh3)
+            self._record_outcome(step_task, outcome, step.specialist)
+
             # Stop on failure (re-plan would happen at higher tier)
             if outcome.status == TaskStatus.FAILED:
                 logger.warning(f"[Dispatcher] Step {i + 1} failed, stopping execution")
@@ -806,7 +813,10 @@ class RoutingDispatcher:
     def _select_specialist(
         self, task: Task, exclude: list[str] | None = None
     ) -> tuple[str, str, list[str]]:
-        """Select specialist based on task content (heuristic fallback).
+        """Select specialist based on task content.
+
+        Uses learned router when available with sufficient confidence,
+        otherwise falls back to heuristic routing (hi_moe-bh3).
 
         Args:
             task: Task to route
@@ -814,10 +824,26 @@ class RoutingDispatcher:
 
         Returns:
             Tuple of (specialist, routing_strategy, routing_signals)
-            - routing_strategy: "math_first" or "python_direct"
-            - routing_signals: Keywords that influenced the decision
+            - routing_strategy: "learned", "math_first", or "python_direct"
+            - routing_signals: Keywords/reasons that influenced the decision
         """
         exclude = exclude or []
+
+        # Try learned router first (hi_moe-bh3)
+        if self.learned_router:
+            specialist, scores, reasoning = self.learned_router.predict(
+                task.objective, task.context, exclude
+            )
+            if specialist is not None:
+                routing_signals = [f"learned:{reasoning}"]
+                for name, score in scores.items():
+                    routing_signals.append(f"score:{name}={score:.2f}")
+                logger.info(f"[Dispatcher] Learned routing: {specialist} ({reasoning})")
+                return specialist, "learned", routing_signals
+            else:
+                logger.info(f"[Dispatcher] Learned router deferred: {reasoning}")
+
+        # Fall back to heuristic routing
         objective_lower = task.objective.lower()
 
         # Track routing signals (hi_moe-gr7)
@@ -897,10 +923,7 @@ class RoutingDispatcher:
     def _record_outcome(
         self, task: Task, outcome: Outcome, specialist: str
     ) -> None:
-        """Record outcome to conversation context for future routing (hi_moe-ceg)."""
-        if not self.conversation_context:
-            return
-
+        """Record outcome for future routing (hi_moe-ceg, hi_moe-bh3)."""
         # Extract code from outcome if available (hi_moe-qwo)
         code = None
         if isinstance(outcome.result, FleetResult):
@@ -908,16 +931,31 @@ class RoutingDispatcher:
         elif outcome.result and isinstance(outcome.result, dict):
             code = outcome.result.get("code")
 
-        self.conversation_context.record_outcome(
-            task=task,
-            outcome=outcome,
-            specialist=specialist,
-            code=code,
-        )
-        logger.debug(
-            f"[Dispatcher] Recorded outcome for {specialist}: "
-            f"{self.conversation_context.get_context_summary()}"
-        )
+        # Record to conversation context (hi_moe-ceg)
+        if self.conversation_context:
+            self.conversation_context.record_outcome(
+                task=task,
+                outcome=outcome,
+                specialist=specialist,
+                code=code,
+            )
+            logger.debug(
+                f"[Dispatcher] Recorded outcome for {specialist}: "
+                f"{self.conversation_context.get_context_summary()}"
+            )
+
+        # Record to learned router for online learning (hi_moe-bh3)
+        if self.learned_router:
+            success = outcome.status == TaskStatus.COMPLETED
+            self.learned_router.record_outcome(
+                task_id=task.task_id,
+                objective=task.objective,
+                context=task.context,
+                specialist=specialist,
+                success=success,
+                execution_time_ms=outcome.execution_time_ms,
+                error=outcome.error,
+            )
 
 
 class SpecializedFleet:
