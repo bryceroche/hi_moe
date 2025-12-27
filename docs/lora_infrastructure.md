@@ -482,9 +482,60 @@ Track in `beads:system/metrics/`:
 - Alert if any specialist `success_rate` < 0.8
 - Alert if single adapter handles > 50% of traffic (imbalanced routing)
 
+## LoRA Deferral Strategy (hi_moe-46g)
+
+> **Decision**: Skip LoRAs entirely for v0.1. Train or download adapters only when evidence shows base model is not good enough for a specific tier.
+
+### Rationale
+
+1. **Validate coordination first**: The hierarchy architecture (Architect → Dispatcher → Fleet) is the core innovation. Prove it works before adding LoRA complexity.
+
+2. **Skip training/loading complexity**: LoRA training pipelines, adapter management, and S-LoRA integration add significant engineering overhead.
+
+3. **Faster iteration**: Without adapters, the system is simpler to debug and modify during early development.
+
+4. **Base models are strong**: Modern models like QwQ-32B are capable generalists. Specialization may not provide measurable improvement.
+
+### When to Add LoRAs
+
+Add specialist adapters only when ALL of these are true:
+
+1. **Measured failure**: A specific tier (e.g., Fleet math tasks) has measurably lower success rate than desired
+2. **Root cause identified**: Failure is attributable to model capability, not prompt engineering or routing
+3. **Training data exists**: High-quality domain-specific training data is available
+4. **Baseline established**: Clear before/after metrics can be collected
+
+### Existing Adapter Sources
+
+Before training custom LoRAs, check HuggingFace for existing adapters:
+
+| Model | Adapter Type | Notes |
+|-------|--------------|-------|
+| Qwen2.5 | Code, Math | Check `Qwen/` namespace |
+| QwQ | Reasoning | Limited availability (new model) |
+
+**Warning**: LoRA adapters are model-specific. A Qwen2.5-32B adapter won't work with QwQ-32B.
+
+### Evaluation Protocol
+
+When considering a LoRA addition:
+
+1. Run benchmark suite with base model, record pass rate
+2. Train/download candidate adapter
+3. Run same benchmark with adapter
+4. Compare: if improvement < 5%, don't add the complexity
+5. If improvement >= 5%, A/B test in production before full deployment
+
 ## Implementation Phases
 
-### Phase 1: Single Adapter (MVP)
+### Phase 0: No Adapters (Current - v0.1)
+
+1. Deploy vLLM with base model only (no LoRAs)
+2. Validate full tier coordination works end-to-end
+3. Collect baseline metrics on task success rates
+4. Identify which tiers/domains underperform
+
+### Phase 1: Single Adapter (When Proven Necessary)
 
 1. Deploy vLLM with base model + one LoRA adapter
 2. Hardcode specialist selection in Dispatcher

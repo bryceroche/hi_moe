@@ -728,8 +728,93 @@ async def log_request(beads, request_info: dict):
     })
 ```
 
+## H100 GPU Evaluation (hi_moe-1e7)
+
+> **Goal**: Evaluate if H100 provides sufficient speedup to justify the cost premium over A100.
+
+### Current Baseline (A100 40GB)
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| Full hierarchy latency | ~218s | For hard problems |
+| Per-tier latency | ~30-50s | Single LLM call |
+| Token throughput | ~50 tok/s | With AWQ quantization |
+| Cost | $3.00/hr | Modal pricing |
+
+### H100 Expected Improvements
+
+| Improvement | Source | Expected |
+|-------------|--------|----------|
+| Raw compute | 3x FP16 TFLOPs | 30-50% faster inference |
+| Memory bandwidth | 2x vs A100 | Faster KV cache |
+| FP8 quantization | Native support | ~1.5x throughput |
+| Tensor cores | 4th gen | Better attention compute |
+
+### Evaluation Protocol
+
+1. **Benchmark setup**
+   - Use same problem set as baseline (10 hard problems)
+   - Same model (QwQ-32B-AWQ)
+   - Same prompts and temperature
+
+2. **Metrics to collect**
+   ```python
+   metrics = {
+       "per_call_latency_ms": [],
+       "tokens_per_second": [],
+       "full_hierarchy_time_s": [],
+       "time_to_first_token_ms": [],
+   }
+   ```
+
+3. **Cost-benefit analysis**
+   ```
+   Speedup factor = A100_latency / H100_latency
+   Cost ratio = H100_hourly / A100_hourly
+
+   Worth it if: Speedup factor > Cost ratio
+   ```
+
+4. **Decision criteria**
+   - **Adopt H100 if**: Speedup > 1.5x AND meets latency target (<120s for hard problems)
+   - **Stay with A100 if**: Speedup < 1.3x OR cost increase > 2x
+
+### Modal H100 Configuration
+
+```python
+# When ready to evaluate
+@modal.cls(
+    gpu=modal.gpu.H100(),  # 80GB HBM3
+    ...
+)
+class VLLMServerH100:
+    ...
+```
+
+### Alternative: FP8 on H100
+
+H100 supports native FP8 inference, potentially better than AWQ:
+
+```bash
+vllm serve Qwen/QwQ-32B-Preview \
+  --dtype float16 \
+  --quantization fp8 \
+  --enable-lora
+```
+
+Requires: vLLM >= 0.5.0, transformers with FP8 support.
+
+### Status
+
+- [ ] Baseline metrics collected on A100
+- [ ] H100 Modal deployment tested
+- [ ] Side-by-side comparison run
+- [ ] Cost-benefit documented
+- [ ] Decision made
+
 ## References
 
 - [Modal Documentation](https://modal.com/docs)
 - [Modal vLLM Example](https://modal.com/docs/examples/vllm_inference)
+- [H100 vs A100 Benchmarks](https://www.nvidia.com/en-us/data-center/h100/)
 - [vLLM LoRA Guide](https://docs.vllm.ai/en/stable/features/lora/)
