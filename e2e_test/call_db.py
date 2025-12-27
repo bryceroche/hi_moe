@@ -142,6 +142,173 @@ class CallDB:
                     MAX(created_at) as last_call
                 FROM calls
                 GROUP BY problem_id;
+
+                -- =================================================================
+                -- TRAINING DATA TABLES (hi_moe-828)
+                -- =================================================================
+
+                -- Code validation results for SFT training
+                CREATE TABLE IF NOT EXISTS validations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    call_id INTEGER REFERENCES calls(id),
+                    run_id TEXT NOT NULL,
+                    problem_id TEXT NOT NULL,
+
+                    -- Validation outcome
+                    passed BOOLEAN DEFAULT 0,
+                    tests_total INTEGER DEFAULT 0,
+                    tests_passed INTEGER DEFAULT 0,
+
+                    -- Extracted artifacts
+                    extracted_code TEXT,        -- Clean code from response
+                    execution_output TEXT,      -- stdout/stderr
+                    error_type TEXT,            -- SyntaxError, RuntimeError, WrongAnswer, etc.
+                    error_message TEXT,
+
+                    -- Quality signals
+                    execution_time_ms INTEGER,  -- How long code took to run
+                    memory_used_bytes INTEGER,
+
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_validations_call ON validations(call_id);
+                CREATE INDEX IF NOT EXISTS idx_validations_passed ON validations(passed);
+
+                -- Preference pairs for DPO training
+                CREATE TABLE IF NOT EXISTS comparisons (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    problem_id TEXT NOT NULL,
+                    comparison_group TEXT NOT NULL,  -- Groups attempts on same problem
+
+                    chosen_call_id INTEGER REFERENCES calls(id),
+                    rejected_call_id INTEGER REFERENCES calls(id),
+
+                    -- Why chosen was better
+                    reason TEXT,  -- faster, correct, cleaner, etc.
+                    margin REAL,  -- How much better (0-1)
+
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_comparisons_problem ON comparisons(problem_id);
+                CREATE INDEX IF NOT EXISTS idx_comparisons_group ON comparisons(comparison_group);
+
+                -- Self-healing sequences (error → fix)
+                CREATE TABLE IF NOT EXISTS retries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    problem_id TEXT NOT NULL,
+                    attempt_number INTEGER DEFAULT 1,
+
+                    -- Link to calls
+                    failed_call_id INTEGER REFERENCES calls(id),
+                    retry_call_id INTEGER REFERENCES calls(id),
+
+                    -- Error context passed to retry
+                    error_context TEXT,
+                    fix_strategy TEXT,  -- same_specialist, different_specialist, escalate
+
+                    -- Outcome
+                    retry_succeeded BOOLEAN DEFAULT 0,
+
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_retries_run ON retries(run_id);
+
+                -- Routing decisions for router training
+                CREATE TABLE IF NOT EXISTS routing_decisions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    problem_id TEXT NOT NULL,
+
+                    -- Input features
+                    problem_embedding TEXT,     -- JSON array of floats (optional)
+                    problem_keywords TEXT,      -- JSON array of keywords
+                    estimated_difficulty REAL,  -- 0-1 scale
+
+                    -- Decision
+                    selected_specialist TEXT,
+                    confidence REAL,            -- 0-1
+                    alternative_specialists TEXT,  -- JSON array
+
+                    -- Outcome (filled after execution)
+                    decision_correct BOOLEAN,
+                    actual_specialist_needed TEXT,
+
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_routing_problem ON routing_decisions(problem_id);
+                CREATE INDEX IF NOT EXISTS idx_routing_specialist ON routing_decisions(selected_specialist);
+
+                -- =================================================================
+                -- TRAINING DATA VIEWS
+                -- =================================================================
+
+                -- SFT training pairs: successful (input, output)
+                CREATE VIEW IF NOT EXISTS training_sft AS
+                SELECT
+                    c.id as call_id,
+                    c.problem_id,
+                    c.tier,
+                    c.specialist,
+                    c.input_preview as input,
+                    c.output_preview as output,
+                    v.extracted_code as code,
+                    v.tests_passed,
+                    v.tests_total,
+                    c.created_at
+                FROM calls c
+                JOIN validations v ON v.call_id = c.id
+                WHERE v.passed = 1
+                ORDER BY c.created_at DESC;
+
+                -- DPO training pairs: (chosen, rejected) per problem
+                CREATE VIEW IF NOT EXISTS training_dpo AS
+                SELECT
+                    comp.problem_id,
+                    comp.comparison_group,
+                    chosen.input_preview as chosen_input,
+                    chosen.output_preview as chosen_output,
+                    rejected.input_preview as rejected_input,
+                    rejected.output_preview as rejected_output,
+                    comp.reason,
+                    comp.margin
+                FROM comparisons comp
+                JOIN calls chosen ON chosen.id = comp.chosen_call_id
+                JOIN calls rejected ON rejected.id = comp.rejected_call_id;
+
+                -- Router training: (problem, specialist, success)
+                CREATE VIEW IF NOT EXISTS training_router AS
+                SELECT
+                    r.problem_id,
+                    r.problem_keywords,
+                    r.estimated_difficulty,
+                    r.selected_specialist,
+                    r.confidence,
+                    r.decision_correct,
+                    COUNT(c.id) as attempts,
+                    SUM(CASE WHEN c.success THEN 1 ELSE 0 END) as successes
+                FROM routing_decisions r
+                LEFT JOIN calls c ON c.run_id = r.run_id AND c.specialist = r.selected_specialist
+                GROUP BY r.id;
+
+                -- Self-healing training: error → successful fix
+                CREATE VIEW IF NOT EXISTS training_selfheal AS
+                SELECT
+                    r.problem_id,
+                    failed.output_preview as failed_output,
+                    r.error_context,
+                    r.fix_strategy,
+                    retry.output_preview as successful_output,
+                    rv.extracted_code as fixed_code
+                FROM retries r
+                JOIN calls failed ON failed.id = r.failed_call_id
+                JOIN calls retry ON retry.id = r.retry_call_id
+                LEFT JOIN validations rv ON rv.call_id = r.retry_call_id
+                WHERE r.retry_succeeded = 1;
             """)
 
     @contextmanager
@@ -244,6 +411,184 @@ class CallDB:
                 (status, total_calls, total_tokens, total_time_ms,
                  result_code[:10000] if result_code else None, error, run_id),
             )
+
+    # -------------------------------------------------------------------------
+    # Training data logging (hi_moe-828)
+    # -------------------------------------------------------------------------
+
+    def log_validation(
+        self,
+        call_id: int,
+        run_id: str,
+        problem_id: str,
+        passed: bool,
+        tests_total: int = 0,
+        tests_passed: int = 0,
+        extracted_code: str | None = None,
+        execution_output: str | None = None,
+        error_type: str | None = None,
+        error_message: str | None = None,
+        execution_time_ms: int | None = None,
+    ) -> int:
+        """Log code validation result for SFT training."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO validations (
+                    call_id, run_id, problem_id, passed,
+                    tests_total, tests_passed, extracted_code,
+                    execution_output, error_type, error_message, execution_time_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (call_id, run_id, problem_id, passed,
+                 tests_total, tests_passed,
+                 extracted_code[:50000] if extracted_code else None,
+                 execution_output[:5000] if execution_output else None,
+                 error_type, error_message, execution_time_ms),
+            )
+            return cursor.lastrowid
+
+    def log_comparison(
+        self,
+        problem_id: str,
+        comparison_group: str,
+        chosen_call_id: int,
+        rejected_call_id: int,
+        reason: str | None = None,
+        margin: float = 0.5,
+    ) -> int:
+        """Log preference pair for DPO training."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO comparisons (
+                    problem_id, comparison_group, chosen_call_id,
+                    rejected_call_id, reason, margin
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (problem_id, comparison_group, chosen_call_id,
+                 rejected_call_id, reason, margin),
+            )
+            return cursor.lastrowid
+
+    def log_retry(
+        self,
+        run_id: str,
+        problem_id: str,
+        attempt_number: int,
+        failed_call_id: int,
+        retry_call_id: int,
+        error_context: str | None = None,
+        fix_strategy: str | None = None,
+        retry_succeeded: bool = False,
+    ) -> int:
+        """Log self-healing retry for error→fix training."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO retries (
+                    run_id, problem_id, attempt_number,
+                    failed_call_id, retry_call_id,
+                    error_context, fix_strategy, retry_succeeded
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (run_id, problem_id, attempt_number,
+                 failed_call_id, retry_call_id,
+                 error_context[:5000] if error_context else None,
+                 fix_strategy, retry_succeeded),
+            )
+            return cursor.lastrowid
+
+    def log_routing_decision(
+        self,
+        run_id: str,
+        problem_id: str,
+        selected_specialist: str,
+        confidence: float = 0.5,
+        problem_keywords: list[str] | None = None,
+        estimated_difficulty: float | None = None,
+        alternative_specialists: list[str] | None = None,
+    ) -> int:
+        """Log routing decision for router training."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO routing_decisions (
+                    run_id, problem_id, selected_specialist, confidence,
+                    problem_keywords, estimated_difficulty, alternative_specialists
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (run_id, problem_id, selected_specialist, confidence,
+                 json.dumps(problem_keywords) if problem_keywords else None,
+                 estimated_difficulty,
+                 json.dumps(alternative_specialists) if alternative_specialists else None),
+            )
+            return cursor.lastrowid
+
+    def update_routing_outcome(
+        self,
+        run_id: str,
+        decision_correct: bool,
+        actual_specialist_needed: str | None = None,
+    ):
+        """Update routing decision with outcome after execution."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE routing_decisions SET
+                    decision_correct = ?,
+                    actual_specialist_needed = ?
+                WHERE run_id = ?
+                """,
+                (decision_correct, actual_specialist_needed, run_id),
+            )
+
+    # -------------------------------------------------------------------------
+    # Training data export
+    # -------------------------------------------------------------------------
+
+    def export_sft_data(self, output_path: Path, min_tests_passed: int = 1) -> int:
+        """Export successful examples for SFT training."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM training_sft
+                WHERE tests_passed >= ?
+                """,
+                (min_tests_passed,),
+            ).fetchall()
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w") as f:
+            for row in rows:
+                f.write(json.dumps(dict(row)) + "\n")
+        return len(rows)
+
+    def export_dpo_data(self, output_path: Path) -> int:
+        """Export preference pairs for DPO training."""
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM training_dpo").fetchall()
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w") as f:
+            for row in rows:
+                f.write(json.dumps(dict(row)) + "\n")
+        return len(rows)
+
+    def get_training_stats(self) -> dict:
+        """Get statistics on available training data."""
+        with self._connect() as conn:
+            sft = conn.execute("SELECT COUNT(*) FROM training_sft").fetchone()[0]
+            dpo = conn.execute("SELECT COUNT(*) FROM training_dpo").fetchone()[0]
+            selfheal = conn.execute("SELECT COUNT(*) FROM training_selfheal").fetchone()[0]
+            router = conn.execute("SELECT COUNT(*) FROM training_router").fetchone()[0]
+
+        return {
+            "sft_examples": sft,
+            "dpo_pairs": dpo,
+            "selfheal_sequences": selfheal,
+            "router_decisions": router,
+        }
 
     # -------------------------------------------------------------------------
     # Query methods
