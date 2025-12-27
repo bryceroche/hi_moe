@@ -1,0 +1,79 @@
+{
+  "endpoint": "https://bryce-roche--hi-moe-inference-vllmserver-serve.modal.run",
+  "results": [
+    {
+      "id": "easy-1",
+      "difficulty": "easy",
+      "status": "completed",
+      "has_code": true,
+      "patterns_found": true,
+      "execution_time_ms": 79697.134,
+      "specialist": null
+    },
+    {
+      "id": "easy-2",
+      "difficulty": "easy",
+      "status": "completed",
+      "has_code": true,
+      "patterns_found": true,
+      "execution_time_ms": 82841.176,
+      "specialist": null
+    },
+    {
+      "id": "medium-1",
+      "difficulty": "medium",
+      "status": "completed",
+      "has_code": true,
+      "patterns_found": true,
+      "execution_time_ms": 172755.454,
+      "specialist": null
+    },
+    {
+      "id": "medium-2",
+      "difficulty": "medium",
+      "status": "completed",
+      "has_code": true,
+      "patterns_found": true,
+      "execution_time_ms": 90304.158,
+      "specialist": null
+    },
+    {
+      "id": "hard-1",
+      "difficulty": "hard",
+      "status": "completed",
+      "has_code": true,
+      "patterns_found": true,
+      "execution_time_ms": 184103.78,
+      "specialist": null
+    },
+    {
+      "id": "hard-2",
+      "difficulty": "hard",
+      "status": "completed",
+      "has_code": true,
+      "patterns_found": true,
+      "execution_time_ms": 153209.48799999998,
+      "specialist": "python"
+    }
+  ],
+  "summary": {
+    "total": 6,
+    "passed": 6,
+    "partial": 0,
+    "failed": 0,
+    "by_difficulty": {
+      "easy": {
+        "passed": 2,
+        "total": 2
+      },
+      "medium": {
+        "passed": 2,
+        "total": 2
+      },
+      "hard": {
+        "passed": 2,
+        "total": 2
+      }
+    }
+  }
+}

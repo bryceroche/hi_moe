@@ -117,6 +117,11 @@ def extract_json_from_response(response: str) -> dict:
     # Strip whitespace
     text = response.strip()
 
+    # Handle QwQ model's <think>...</think> reasoning traces
+    # The model outputs reasoning in think tags before the actual JSON response
+    think_pattern = r"<think>.*?</think>"
+    text = re.sub(think_pattern, "", text, flags=re.DOTALL).strip()
+
     # Try direct parse first
     try:
         return json.loads(text)

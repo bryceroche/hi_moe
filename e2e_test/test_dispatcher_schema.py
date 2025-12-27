@@ -119,6 +119,25 @@ class TestExtractJson:
         result = extract_json_from_response(response)
         assert "steps" in result
 
+    def test_json_with_qwq_think_tags(self):
+        """Test QwQ model's <think>...</think> reasoning traces are stripped."""
+        response = '''<think>
+Okay, I need to break down the task into steps. The user wants me to...
+Let me think through this carefully. First, I should...
+</think>
+{"steps": [{"description": "Implement function", "specialist": "python"}]}'''
+        result = extract_json_from_response(response)
+        assert "steps" in result
+        assert result["steps"][0]["description"] == "Implement function"
+
+    def test_json_with_multiple_think_tags(self):
+        """Test multiple think blocks are all stripped."""
+        response = '''<think>First thought...</think>
+<think>Second thought...</think>
+{"steps": [{"description": "Test", "specialist": "python"}]}'''
+        result = extract_json_from_response(response)
+        assert "steps" in result
+
     def test_invalid_json_fails(self):
         with pytest.raises(ValueError, match="Could not extract valid JSON"):
             extract_json_from_response("This is not JSON at all")
