@@ -56,6 +56,18 @@ class TaskStatus(Enum):
     FAILED = "failed"
 
 
+class RoutingMode(Enum):
+    """Routing mode for specialist selection (hi_moe-zrn).
+
+    WINNER_TAKE_ALL: Always pick highest-scoring specialist (default)
+    PROBABILISTIC: Sample proportionally to similarity scores
+    BLENDED: Return blend weights for LoRA composition (future)
+    """
+    WINNER_TAKE_ALL = "winner_take_all"
+    PROBABILISTIC = "probabilistic"
+    BLENDED = "blended"
+
+
 @dataclass
 class Task:
     """Task passed between tiers."""
@@ -882,6 +894,7 @@ class RoutingDispatcher:
         embedding_router: EmbeddingRouter | None = None,
         memory: DispatcherMemory | None = None,
         call_db: "CallDB | None" = None,
+        routing_mode: RoutingMode = RoutingMode.WINNER_TAKE_ALL,
     ):
         self.fleet = fleet
         self.llm = llm  # Optional: for structured plan generation
@@ -891,7 +904,9 @@ class RoutingDispatcher:
         self.embedding_router = embedding_router  # Optional: embedding routing (hi_moe-awf)
         self.memory = memory or DispatcherMemory()  # Per-run memory (hi_moe-mz5)
         self.call_db = call_db  # Optional: for routing decision logging (hi_moe-ehx)
+        self.routing_mode = routing_mode  # Routing mode: winner_take_all, probabilistic, blended (hi_moe-zrn)
         self._specialist_rates_cache: dict | None = None  # Cache for session (hi_moe-fsb)
+        self._last_blend_weights: dict[str, float] | None = None  # Cache blend weights for LoRA blending (hi_moe-zrn)
 
     def _get_adaptive_confidence(self, specialist: str, base_confidence: float) -> float:
         """Calculate adaptive confidence based on historical success rates (hi_moe-fsb).

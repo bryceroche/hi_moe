@@ -309,6 +309,141 @@ class EmbeddingRouter:
 
         return best_specialist, scores, reasoning
 
+    def predict_weighted(
+        self,
+        objective: str,
+        context: dict | None = None,
+        exclude: list[str] | None = None,
+        min_weight: float = 0.1,
+    ) -> tuple[dict[str, float], str]:
+        """Predict blend weights for all specialists (hi_moe-zrn).
+
+        Returns normalized similarity scores as blend weights.
+        Weights sum to 1.0 and can be used for:
+        - LoRA weight blending: merged = w1*python + w2*math
+        - Probabilistic routing: P(python) = w1
+
+        Args:
+            objective: Task objective text
+            context: Optional task context
+            exclude: Specialists to exclude
+            min_weight: Minimum weight to include (filters noise)
+
+        Returns:
+            Tuple of (weights_dict, reasoning)
+            weights_dict maps specialist -> weight (0-1), sums to 1.0
+        """
+        exclude = exclude or []
+
+        # Get raw prediction and scores
+        _, scores, base_reasoning = self.predict(objective, context, exclude)
+
+        if not scores:
+            return {}, "No specialists available"
+
+        # Filter out very low scores (noise)
+        filtered = {s: score for s, score in scores.items() if score >= min_weight}
+        if not filtered:
+            # If all filtered out, keep the best one
+            best = max(scores, key=lambda k: scores[k])
+            filtered = {best: scores[best]}
+
+        # Normalize to sum to 1.0
+        total = sum(filtered.values())
+        if total <= 0:
+            # Uniform fallback
+            n = len(filtered)
+            weights = {s: 1.0 / n for s in filtered}
+        else:
+            weights = {s: score / total for s, score in filtered.items()}
+
+        # Sort by weight descending
+        weights = dict(sorted(weights.items(), key=lambda x: -x[1]))
+
+        # Build reasoning
+        weight_strs = [f"{s}={w:.0%}" for s, w in weights.items()]
+        reasoning = f"Blend weights: {', '.join(weight_strs)}"
+
+        return weights, reasoning
+
+    def select_probabilistic(
+        self,
+        objective: str,
+        context: dict | None = None,
+        exclude: list[str] | None = None,
+    ) -> tuple[str, dict[str, float], str]:
+        """Select specialist probabilistically based on similarity weights (hi_moe-zrn).
+
+        Instead of always picking the highest-scoring specialist,
+        samples proportionally to similarity scores. Over many requests,
+        this achieves an effective "blend" across specialists.
+
+        Args:
+            objective: Task objective text
+            context: Optional task context
+            exclude: Specialists to exclude
+
+        Returns:
+            Tuple of (selected_specialist, weights, reasoning)
+        """
+        weights, base_reasoning = self.predict_weighted(objective, context, exclude)
+
+        if not weights:
+            return "python", {}, "No weights, defaulting to python"
+
+        # Probabilistic selection based on weights
+        specialists = list(weights.keys())
+        probs = list(weights.values())
+
+        # Use numpy for weighted random choice
+        selected = np.random.choice(specialists, p=probs)
+
+        reasoning = f"Probabilistic selection: {selected} (from {base_reasoning})"
+
+        return selected, weights, reasoning
+
+    def recommend_blending(
+        self,
+        objective: str,
+        context: dict | None = None,
+        blend_threshold: float = 0.3,
+    ) -> tuple[bool, dict[str, float], str]:
+        """Check if blending is recommended for a task (hi_moe-zrn).
+
+        Blending is recommended when multiple specialists have similar
+        scores, indicating the task spans multiple domains.
+
+        Args:
+            objective: Task objective text
+            context: Optional task context
+            blend_threshold: If second-best is within this of best, blend
+
+        Returns:
+            Tuple of (should_blend, weights, reasoning)
+        """
+        weights, _ = self.predict_weighted(objective, context)
+
+        if len(weights) < 2:
+            return False, weights, "Only one specialist available"
+
+        # Check if top two are close
+        sorted_weights = sorted(weights.values(), reverse=True)
+        best = sorted_weights[0]
+        second = sorted_weights[1]
+
+        # If second-best is at least (1 - threshold) of best, recommend blending
+        # e.g., if best=0.55 and second=0.35, ratio=0.64 > 0.7 (threshold=0.3)
+        ratio = second / best if best > 0 else 0
+        should_blend = ratio >= (1 - blend_threshold)
+
+        if should_blend:
+            reasoning = f"Blending recommended: top scores are close ({best:.0%} vs {second:.0%})"
+        else:
+            best_specialist = max(weights, key=lambda k: weights[k])
+            reasoning = f"Single specialist preferred: {best_specialist} dominates ({best:.0%} vs {second:.0%})"
+
+        return should_blend, weights, reasoning
+
     def record_outcome(
         self,
         task_id: str,
@@ -565,18 +700,38 @@ if __name__ == "__main__":
         "Implement a stack data structure with push, pop, and peek operations",
         "Find the longest palindromic substring in a given string",
         "Calculate the mathematical formula for Fibonacci numbers",
+        # Cross-domain tasks (good candidates for blending)
+        "Write a Python function to calculate prime factorization using Sieve of Eratosthenes",
+        "Implement dynamic programming to compute optimal matrix chain multiplication",
     ]
 
-    print("\n--- Predictions ---")
+    print("\n--- Standard Predictions ---")
     for test in test_cases:
         specialist, scores, reasoning = router.predict(test)
         print(f"\nTask: {test[:60]}...")
         print(f"  Prediction: {specialist}")
         print(f"  Reasoning: {reasoning}")
-        print(f"  Scores: {dict(sorted(scores.items(), key=lambda x: -x[1]))}")
+
+    print("\n\n--- Weighted Routing (hi_moe-zrn) ---")
+    for test in test_cases:
+        weights, reasoning = router.predict_weighted(test)
+        should_blend, _, blend_reason = router.recommend_blending(test)
+        print(f"\nTask: {test[:60]}...")
+        print(f"  Weights: {weights}")
+        print(f"  Blend? {should_blend} - {blend_reason}")
+
+    print("\n\n--- Probabilistic Selection (5 samples each) ---")
+    for test in test_cases[-2:]:  # Just the cross-domain ones
+        print(f"\nTask: {test[:60]}...")
+        selections = []
+        for _ in range(5):
+            specialist, weights, _ = router.select_probabilistic(test)
+            selections.append(specialist)
+        print(f"  Weights: {weights}")
+        print(f"  5 samples: {selections}")
 
     # Simulate some outcomes for prototype learning
-    print("\n--- Recording outcomes ---")
+    print("\n\n--- Recording outcomes ---")
     router.record_outcome("t1", "implement two sum", None, "python", True)
     router.record_outcome("t2", "prove correctness", None, "math", True)
     router.record_outcome("t3", "write binary search", None, "python", True)
