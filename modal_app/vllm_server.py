@@ -232,20 +232,17 @@ class VLLMServer:
         adapter_name: str | None = None,
         max_tokens: int = 2048,
         temperature: float = 0.7,
-        enable_thinking: bool = False,  # Disable thinking by default (hi_moe-4os)
     ) -> dict:
         """Internal chat method callable from ASGI endpoints."""
         import uuid
 
         # Format messages as ChatML
-        # Add /no_think to disable Qwen3 thinking mode (hi_moe-4os)
+        # Note: Qwen3-32B-AWQ is a regular model without thinking mode,
+        # so no /no_think directive needed (hi_moe-4os)
         prompt = ""
         for msg in messages:
             role = msg["role"]
             content = msg["content"]
-            # Append thinking control to first user message
-            if role == "user" and not enable_thinking and "/think" not in content:
-                content = content + " /no_think"
             prompt += f"<|im_start|>{role}\n{content}<|im_end|>\n"
         prompt += "<|im_start|>assistant\n"
 
