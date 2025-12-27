@@ -290,7 +290,7 @@ class LLMClient:
         self,
         messages: list[dict],
         temperature: float = 0.3,
-        max_tokens: int = 2048,
+        max_tokens: int = 4096,
         adapter: str | None = None,
     ) -> str:
         """Generate completion from LLM with optional adapter."""
