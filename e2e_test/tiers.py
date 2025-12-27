@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional, Union, TYPE_CHECKING
+from typing import Any, Callable, Optional, Union, TYPE_CHECKING
 
 from .dispatcher_schema import (
     DispatcherPlan,
@@ -659,6 +659,7 @@ class SpecializedFleet:
     """Tier 3: Execute tasks with specialist capabilities.
 
     Maps specialist types to LoRA adapters when available.
+    Supports self-healing with code validation and retry (hi_moe-f5d).
     """
 
     # Map specialist types to adapter name patterns
@@ -675,9 +676,11 @@ class SpecializedFleet:
         self,
         llm: LLMClient,
         trajectory_logger: "TrajectoryLogger | None" = None,
+        code_runner: "Callable[[str, list], dict] | None" = None,
     ):
         self.llm = llm
         self.trajectory_logger = trajectory_logger
+        self.code_runner = code_runner  # Optional code validation (hi_moe-f5d)
         self._adapter_cache: dict[str, str | None] = {}
 
     async def _get_adapter_for_specialist(self, specialist: str) -> str | None:
@@ -762,10 +765,57 @@ class SpecializedFleet:
             # Extract code from response
             code = self._extract_code(response)
 
+            # Self-healing: validate code if we have a runner and test cases (hi_moe-f5d)
+            validation_result = None
+            test_cases = task.context.get("test_cases") if task.context else None
+
+            if code and self.code_runner and test_cases:
+                try:
+                    validation_result = self.code_runner(code, test_cases)
+                    logger.info(
+                        f"[Fleet] Validation: {validation_result.get('total_passed', 0)}/"
+                        f"{validation_result.get('total_passed', 0) + validation_result.get('total_failed', 0)} tests passed"
+                    )
+
+                    if not validation_result.get("passed", False):
+                        # Build detailed error feedback for retry
+                        error_feedback = self._format_validation_error(validation_result)
+                        logger.warning(f"[Fleet] Code validation failed: {error_feedback[:200]}...")
+
+                        # Log failed validation attempt (hi_moe-r8q)
+                        if self.trajectory_logger:
+                            from .trajectory_logger import FleetRecord
+                            fleet_record = FleetRecord(
+                                ts=datetime.utcnow().isoformat(),
+                                task_id=task.task_id,
+                                task_objective=task.objective,
+                                specialist=specialist,
+                                prompt_used=system_prompt,
+                                output_code=code,
+                                execution_time_ms=execution_time_ms,
+                                status="error",
+                                error=f"Validation failed: {error_feedback[:500]}",
+                                validation_result=validation_result,
+                                metadata={"context": task.context, "adapter": adapter},
+                            )
+                            self.trajectory_logger.log_fleet(fleet_record)
+
+                        return Outcome(
+                            task_id=task.task_id,
+                            status=TaskStatus.FAILED,
+                            result={"code": code, "validation": validation_result},
+                            error=error_feedback,
+                            metadata={"specialist": specialist, "adapter": adapter},
+                        )
+
+                except Exception as e:
+                    logger.error(f"[Fleet] Code validation error: {e}")
+                    # Continue without validation on error
+
             outcome = Outcome(
                 task_id=task.task_id,
                 status=TaskStatus.COMPLETED,
-                result={"code": code, "raw_response": response},
+                result={"code": code, "raw_response": response, "validation": validation_result},
                 metadata={"specialist": specialist, "adapter": adapter},
             )
 
@@ -851,3 +901,39 @@ Write a Python solution. Output only the code, wrapped in ```python``` blocks.""
 
         # Fallback: assume entire response is code
         return response.strip()
+
+    def _format_validation_error(self, validation: dict) -> str:
+        """Format validation results into helpful error feedback for retry (hi_moe-f5d).
+
+        Creates detailed feedback about which tests failed and why, so the
+        specialist can fix the code on retry.
+        """
+        lines = ["Code validation failed:"]
+
+        # Summary
+        passed = validation.get("total_passed", 0)
+        failed = validation.get("total_failed", 0)
+        lines.append(f"  Passed: {passed}/{passed + failed} tests")
+
+        # Individual test failures
+        test_results = validation.get("test_results", [])
+        for result in test_results:
+            status = result.get("status", "unknown")
+            if status != "passed":
+                test_id = result.get("test_id", "unknown")
+                lines.append(f"\n  Test {test_id}: {status.upper()}")
+
+                # Show expected vs actual for wrong answers
+                if status == "wrong_answer":
+                    expected = result.get("expected_output", "")
+                    actual = result.get("actual_output", "")
+                    lines.append(f"    Expected: {expected[:100]}")
+                    lines.append(f"    Got:      {actual[:100]}")
+
+                # Show error message for runtime errors
+                error_msg = result.get("error_message")
+                if error_msg:
+                    lines.append(f"    Error: {error_msg[:200]}")
+
+        lines.append("\nPlease fix the code and try again.")
+        return "\n".join(lines)

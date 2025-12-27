@@ -293,3 +293,154 @@ class TestRoutingStrategy:
         # Math should win because it's processed first
         assert specialist == "math"
         assert strategy == "math_first"
+
+
+class TestSelfHealing:
+    """Tests for self-healing with code validation (hi_moe-f5d)."""
+
+    def test_format_validation_error_wrong_answer(self):
+        """Test error formatting for wrong answer."""
+        from .tiers import SpecializedFleet, MockLLMClient
+
+        fleet = SpecializedFleet(MockLLMClient())
+
+        validation = {
+            "passed": False,
+            "total_passed": 1,
+            "total_failed": 1,
+            "test_results": [
+                {"test_id": "test-1", "status": "passed"},
+                {
+                    "test_id": "test-2",
+                    "status": "wrong_answer",
+                    "expected_output": "10",
+                    "actual_output": "6",
+                },
+            ],
+        }
+
+        error = fleet._format_validation_error(validation)
+
+        assert "Code validation failed" in error
+        assert "1/2 tests" in error
+        assert "test-2" in error
+        assert "WRONG_ANSWER" in error
+        assert "Expected: 10" in error
+        assert "Got:      6" in error
+
+    def test_format_validation_error_runtime_error(self):
+        """Test error formatting for runtime error."""
+        from .tiers import SpecializedFleet, MockLLMClient
+
+        fleet = SpecializedFleet(MockLLMClient())
+
+        validation = {
+            "passed": False,
+            "total_passed": 0,
+            "total_failed": 1,
+            "test_results": [
+                {
+                    "test_id": "test-1",
+                    "status": "runtime_error",
+                    "error_message": "ZeroDivisionError: division by zero",
+                },
+            ],
+        }
+
+        error = fleet._format_validation_error(validation)
+
+        assert "Code validation failed" in error
+        assert "0/1 tests" in error
+        assert "RUNTIME_ERROR" in error
+        assert "ZeroDivisionError" in error
+
+    def test_format_validation_error_timeout(self):
+        """Test error formatting for timeout."""
+        from .tiers import SpecializedFleet, MockLLMClient
+
+        fleet = SpecializedFleet(MockLLMClient())
+
+        validation = {
+            "passed": False,
+            "total_passed": 0,
+            "total_failed": 1,
+            "test_results": [
+                {
+                    "test_id": "test-1",
+                    "status": "timeout",
+                    "error_message": "Timeout after 5s",
+                },
+            ],
+        }
+
+        error = fleet._format_validation_error(validation)
+
+        assert "TIMEOUT" in error
+        assert "Timeout after 5s" in error
+
+    @pytest.mark.asyncio
+    async def test_fleet_with_code_runner_pass(self):
+        """Test Fleet passes validation with correct code."""
+        from .tiers import SpecializedFleet, MockLLMClient, Task, TaskStatus
+
+        def mock_runner(code, test_cases):
+            return {"passed": True, "total_passed": 1, "total_failed": 0, "test_results": []}
+
+        fleet = SpecializedFleet(MockLLMClient(), code_runner=mock_runner)
+
+        task = Task(
+            task_id="test-1",
+            objective="Write a function",
+            context={"test_cases": [{"input": "5", "expected": "10"}]},
+        )
+
+        outcome = await fleet.execute(task, "python")
+
+        assert outcome.status == TaskStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_fleet_with_code_runner_fail(self):
+        """Test Fleet fails validation with wrong code."""
+        from .tiers import SpecializedFleet, MockLLMClient, Task, TaskStatus
+
+        def mock_runner(code, test_cases):
+            return {
+                "passed": False,
+                "total_passed": 0,
+                "total_failed": 1,
+                "test_results": [
+                    {"test_id": "test-1", "status": "wrong_answer", "expected_output": "10", "actual_output": "6"}
+                ],
+            }
+
+        fleet = SpecializedFleet(MockLLMClient(), code_runner=mock_runner)
+
+        task = Task(
+            task_id="test-1",
+            objective="Write a function",
+            context={"test_cases": [{"input": "5", "expected": "10"}]},
+        )
+
+        # Should fail because validation fails and retries are exhausted
+        outcome = await fleet.execute(task, "python")
+
+        assert outcome.status == TaskStatus.FAILED
+        assert "Code validation failed" in outcome.error
+
+    @pytest.mark.asyncio
+    async def test_fleet_no_code_runner(self):
+        """Test Fleet works without code runner (no validation)."""
+        from .tiers import SpecializedFleet, MockLLMClient, Task, TaskStatus
+
+        fleet = SpecializedFleet(MockLLMClient())  # No code_runner
+
+        task = Task(
+            task_id="test-1",
+            objective="Write a function",
+            context={"test_cases": [{"input": "5", "expected": "10"}]},
+        )
+
+        outcome = await fleet.execute(task, "python")
+
+        # Should complete without validation
+        assert outcome.status == TaskStatus.COMPLETED
