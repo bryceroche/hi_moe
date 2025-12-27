@@ -43,6 +43,7 @@ from .trajectory_logger import (
     VLLMCallRecord,
     create_logging_client,
 )
+from .call_db import CallDB
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +132,7 @@ class Runner:
         code_runner: Callable[[str, list], dict] | None = None,
         enable_trajectory_logging: bool = True,
         enable_fast_path: bool = True,
+        enable_training_db: bool = True,
     ):
         """Initialize the Runner.
 
@@ -141,12 +143,20 @@ class Runner:
             code_runner: Optional code execution function
             enable_trajectory_logging: Enable detailed vLLM call logging (hi_moe-iz9)
             enable_fast_path: Enable tier-skip for simple problems (hi_moe-00z)
+            enable_training_db: Enable SQLite training data logging (hi_moe-828)
         """
         self.retry_config = retry_config or RetryConfig()
         self.log_dir = Path(log_dir) if log_dir else Path("./runs")
         self.code_runner = code_runner
         self.enable_trajectory_logging = enable_trajectory_logging
         self.enable_fast_path = enable_fast_path
+        self.enable_training_db = enable_training_db
+
+        # Initialize training data DB (hi_moe-828)
+        self.call_db: CallDB | None = None
+        if enable_training_db:
+            self.call_db = CallDB(self.log_dir / "hi_moe.db")
+            logger.info(f"[Runner] Training DB enabled at {self.log_dir / 'hi_moe.db'}")
 
         # Set up trajectory logging if enabled
         self.trajectory_logger: TrajectoryLogger | None = None
@@ -231,6 +241,22 @@ class Runner:
                 except Exception as e:
                     logger.error(f"[Runner] Code validation failed: {e}")
                     validation = {"error": str(e), "passed": False}
+
+            # Log validation to training DB (hi_moe-828)
+            if self.call_db and validation:
+                last_call_id = context.get("last_call_id")
+                self.call_db.log_validation(
+                    call_id=last_call_id or 0,
+                    run_id=run_id,
+                    problem_id=problem.get("id", "unknown"),
+                    passed=validation.get("passed", False),
+                    tests_total=validation.get("total", len(problem.get("test_cases", []))),
+                    tests_passed=validation.get("passed_count", 0),
+                    extracted_code=code,
+                    execution_output=validation.get("output"),
+                    error_type=validation.get("error_type"),
+                    error_message=validation.get("error"),
+                )
 
             # Determine final status
             if outcome and outcome.status == TaskStatus.COMPLETED:

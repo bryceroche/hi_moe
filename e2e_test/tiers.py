@@ -291,15 +291,19 @@ class LLMClient:
         self,
         messages: list[dict],
         temperature: float = 0.3,
-        max_tokens: int = 4096,
+        max_tokens: int = 2048,
         adapter: str | None = None,
     ) -> str:
         """Generate completion from LLM with optional adapter."""
         from openai import AsyncOpenAI
+        import httpx
 
+        # 5 minute timeout for long generations (QwQ can be slow)
+        http_client = httpx.AsyncClient(timeout=httpx.Timeout(300.0))
         client = AsyncOpenAI(
             base_url=f"{self.endpoint}/v1",
             api_key="not-needed",
+            http_client=http_client,
         )
 
         # Use adapter if specified, otherwise base
