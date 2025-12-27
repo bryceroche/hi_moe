@@ -358,6 +358,7 @@ class Runner:
 
         last_outcome = None
         last_error = None
+        last_failed_call_id = None  # Track for retry logging (hi_moe-828)
 
         for attempt in range(self.retry_config.top_level_retries + 1):
             if attempt > 0:
@@ -382,11 +383,26 @@ class Runner:
                     "error": outcome.error,
                 })
 
+                current_call_id = context.get("last_call_id", 0)
+
                 if outcome.status == TaskStatus.COMPLETED:
+                    # Log successful retry for self-healing training (hi_moe-828)
+                    if attempt > 0 and self.call_db and last_failed_call_id:
+                        self.call_db.log_retry(
+                            run_id=context.run_id,
+                            problem_id=problem.get("id", "unknown"),
+                            attempt_number=attempt + 1,
+                            failed_call_id=last_failed_call_id,
+                            retry_call_id=current_call_id,
+                            error_context=last_error,
+                            fix_strategy="top_level_retry",
+                            retry_succeeded=True,
+                        )
                     return outcome
 
                 last_outcome = outcome
                 last_error = outcome.error
+                last_failed_call_id = current_call_id
 
                 # Check if we should retry
                 if outcome.error and "retry" not in outcome.error.lower():
