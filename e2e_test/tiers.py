@@ -1480,15 +1480,21 @@ class SpecializedFleet:
         trajectory_logger: "TrajectoryLogger | None" = None,
         code_runner: "Callable[[str, list], dict] | None" = None,
         memory: FleetMemory | None = None,
+        enable_adapters: bool = True,  # Disable for A/B testing (hi_moe-e1v)
     ):
         self.llm = llm
         self.trajectory_logger = trajectory_logger
         self.code_runner = code_runner  # Optional code validation (hi_moe-f5d)
         self.memory = memory or FleetMemory()  # Per-specialist memory (hi_moe-mz5)
+        self.enable_adapters = enable_adapters  # Toggle adapters for experiments (hi_moe-e1v)
         self._adapter_cache: dict[str, str | None] = {}
 
     async def _get_adapter_for_specialist(self, specialist: str) -> str | None:
         """Find best matching adapter for a specialist type."""
+        # Check if adapters are disabled for A/B testing (hi_moe-e1v)
+        if not self.enable_adapters:
+            logger.info(f"[Fleet] Adapters disabled (hi_moe-e1v), using base model for '{specialist}'")
+            return None
         # Adapters re-enabled after training with Qwen3-32B (hi_moe-7l1)
         if specialist in self._adapter_cache:
             return self._adapter_cache[specialist]
