@@ -58,6 +58,7 @@ def evaluate_adapter(
                         "temperature": 0.2,
                     },
                     timeout=300.0,  # 5 minutes for QwQ
+                    follow_redirects=True,  # Follow Modal redirects
                 )
                 elapsed = time.time() - start
                 total_time += elapsed
