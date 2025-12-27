@@ -444,3 +444,175 @@ class TestSelfHealing:
 
         # Should complete without validation
         assert outcome.status == TaskStatus.COMPLETED
+
+
+class TestMultiTurnContext:
+    """Tests for multi-turn context (hi_moe-ceg)."""
+
+    def test_specialist_stats_success_rate(self):
+        """Test specialist success rate calculation."""
+        from .tiers import SpecialistStats
+
+        stats = SpecialistStats()
+        assert stats.success_rate == 0.5  # Default when no data
+
+        stats.record_success(100)
+        assert stats.success_rate == 1.0
+
+        stats.record_failure(100)
+        assert stats.success_rate == 0.5
+
+        stats.record_success(100)
+        stats.record_success(100)
+        assert stats.success_rate == 0.75  # 3/4
+
+    def test_conversation_context_record_outcome(self):
+        """Test recording outcomes to context."""
+        from .tiers import ConversationContext, Task, Outcome, TaskStatus
+
+        ctx = ConversationContext(session_id="test-session")
+
+        task = Task(task_id="task-1", objective="Write a function")
+        outcome = Outcome(
+            task_id="task-1",
+            status=TaskStatus.COMPLETED,
+            execution_time_ms=100,
+        )
+
+        ctx.record_outcome(task, outcome, "python", code="def foo(): pass")
+
+        assert "python" in ctx.specialist_stats
+        assert ctx.specialist_stats["python"].successes == 1
+        assert len(ctx.solution_history) == 1
+        assert ctx.solution_history[0].success is True
+
+    def test_conversation_context_specialist_preference(self):
+        """Test specialist preference ordering by success rate."""
+        from .tiers import ConversationContext, Task, Outcome, TaskStatus
+
+        ctx = ConversationContext(session_id="test-session")
+
+        # Python: 2 success, 0 failure = 100%
+        for i in range(2):
+            ctx.record_outcome(
+                Task(task_id=f"task-p{i}", objective="python task"),
+                Outcome(task_id=f"task-p{i}", status=TaskStatus.COMPLETED, execution_time_ms=100),
+                "python",
+            )
+
+        # Math: 1 success, 1 failure = 50%
+        ctx.record_outcome(
+            Task(task_id="task-m1", objective="math task"),
+            Outcome(task_id="task-m1", status=TaskStatus.COMPLETED, execution_time_ms=100),
+            "math",
+        )
+        ctx.record_outcome(
+            Task(task_id="task-m2", objective="math task"),
+            Outcome(task_id="task-m2", status=TaskStatus.FAILED, execution_time_ms=100),
+            "math",
+        )
+
+        # Debug: 0 success, 1 failure = 0%
+        ctx.record_outcome(
+            Task(task_id="task-d1", objective="debug task"),
+            Outcome(task_id="task-d1", status=TaskStatus.FAILED, execution_time_ms=100),
+            "debugging",
+        )
+
+        preference = ctx.get_specialist_preference()
+        assert preference[0] == "python"  # 100% success rate
+        assert preference[1] == "math"     # 50% success rate, 2 attempts
+        assert preference[2] == "debugging"  # 0% success rate
+
+    def test_conversation_context_relevant_solutions(self):
+        """Test finding relevant previous solutions."""
+        from .tiers import ConversationContext, Task, Outcome, TaskStatus
+
+        ctx = ConversationContext(session_id="test-session")
+
+        # Add some solutions
+        ctx.record_outcome(
+            Task(task_id="task-1", objective="Write a function to sort numbers"),
+            Outcome(task_id="task-1", status=TaskStatus.COMPLETED, execution_time_ms=100),
+            "python",
+            code="def sort_numbers(nums): return sorted(nums)",
+        )
+        ctx.record_outcome(
+            Task(task_id="task-2", objective="Implement a binary search"),
+            Outcome(task_id="task-2", status=TaskStatus.COMPLETED, execution_time_ms=100),
+            "algorithms",
+            code="def binary_search(arr, x): pass",
+        )
+
+        # Query for sorting related
+        relevant = ctx.get_relevant_solutions("Sort an array of numbers")
+        assert len(relevant) >= 1
+        assert any("sort" in sol.code for sol in relevant)
+
+    def test_conversation_context_max_history(self):
+        """Test that solution history is capped at max_history."""
+        from .tiers import ConversationContext, Task, Outcome, TaskStatus
+
+        ctx = ConversationContext(session_id="test-session", max_history=3)
+
+        # Add 5 solutions
+        for i in range(5):
+            ctx.record_outcome(
+                Task(task_id=f"task-{i}", objective=f"Task {i}"),
+                Outcome(task_id=f"task-{i}", status=TaskStatus.COMPLETED, execution_time_ms=100),
+                "python",
+                code=f"code_{i}",
+            )
+
+        assert len(ctx.solution_history) == 3
+        # Should keep the last 3
+        assert ctx.solution_history[0].code == "code_2"
+        assert ctx.solution_history[2].code == "code_4"
+
+    def test_dispatcher_with_context_preference(self):
+        """Test dispatcher uses context for specialist preference."""
+        from .tiers import RoutingDispatcher, SpecializedFleet, MockLLMClient, Task, ConversationContext
+
+        ctx = ConversationContext(session_id="test-session")
+
+        # Build up history: math has 100% success
+        from .tiers import Outcome, TaskStatus
+        ctx.record_outcome(
+            Task(task_id="t1", objective="math task"),
+            Outcome(task_id="t1", status=TaskStatus.COMPLETED, execution_time_ms=100),
+            "math",
+        )
+        ctx.record_outcome(
+            Task(task_id="t2", objective="math task 2"),
+            Outcome(task_id="t2", status=TaskStatus.COMPLETED, execution_time_ms=100),
+            "math",
+        )
+
+        fleet = SpecializedFleet(MockLLMClient())
+        dispatcher = RoutingDispatcher(fleet, conversation_context=ctx)
+
+        # Task with no specific keywords - should prefer math due to history
+        task = Task(task_id="t3", objective="Do a general task")
+        specialist, strategy, signals = dispatcher._select_specialist(task)
+
+        # Context preference should be in signals
+        assert any("context:preferred" in s for s in signals)
+
+    def test_context_summary(self):
+        """Test context summary generation."""
+        from .tiers import ConversationContext, Task, Outcome, TaskStatus
+
+        ctx = ConversationContext(session_id="test-session")
+        ctx.record_outcome(
+            Task(task_id="t1", objective="task"),
+            Outcome(task_id="t1", status=TaskStatus.COMPLETED, execution_time_ms=100),
+            "python",
+            code="code",
+        )
+        ctx.add_message("user", "Hello")
+
+        summary = ctx.get_context_summary()
+        assert summary["session_id"] == "test-session"
+        assert summary["total_tasks"] == 1
+        assert summary["solutions_stored"] == 1
+        assert summary["messages"] == 1

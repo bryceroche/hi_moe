@@ -69,6 +69,149 @@ class Outcome:
     metadata: dict = field(default_factory=dict)
 
 
+# Multi-turn context support (hi_moe-ceg)
+@dataclass
+class SpecialistStats:
+    """Performance statistics for a specialist."""
+    successes: int = 0
+    failures: int = 0
+    total_time_ms: float = 0
+
+    @property
+    def success_rate(self) -> float:
+        """Calculate success rate (0-1)."""
+        total = self.successes + self.failures
+        return self.successes / total if total > 0 else 0.5
+
+    @property
+    def avg_time_ms(self) -> float:
+        """Average execution time."""
+        total = self.successes + self.failures
+        return self.total_time_ms / total if total > 0 else 0
+
+    def record_success(self, time_ms: float) -> None:
+        """Record a successful execution."""
+        self.successes += 1
+        self.total_time_ms += time_ms
+
+    def record_failure(self, time_ms: float) -> None:
+        """Record a failed execution."""
+        self.failures += 1
+        self.total_time_ms += time_ms
+
+
+@dataclass
+class SolutionRecord:
+    """Record of a previous solution."""
+    task_id: str
+    objective: str
+    code: str
+    specialist: str
+    success: bool
+    timestamp: datetime = field(default_factory=datetime.now)
+
+
+@dataclass
+class ConversationContext:
+    """Multi-turn context that persists across runs (hi_moe-ceg).
+
+    Tracks:
+    - Previous solutions for Architect reference
+    - Specialist performance for Dispatcher routing
+    - Message history for continuity
+    """
+    session_id: str
+    specialist_stats: dict[str, SpecialistStats] = field(default_factory=dict)
+    solution_history: list[SolutionRecord] = field(default_factory=list)
+    messages: list[dict] = field(default_factory=list)
+    max_history: int = 10  # Keep last N solutions
+
+    def record_outcome(
+        self,
+        task: Task,
+        outcome: Outcome,
+        specialist: str,
+        code: str | None = None,
+    ) -> None:
+        """Record task outcome for context tracking."""
+        # Update specialist stats
+        if specialist not in self.specialist_stats:
+            self.specialist_stats[specialist] = SpecialistStats()
+
+        stats = self.specialist_stats[specialist]
+        if outcome.status == TaskStatus.COMPLETED:
+            stats.record_success(outcome.execution_time_ms)
+        else:
+            stats.record_failure(outcome.execution_time_ms)
+
+        # Store solution if code was generated
+        if code:
+            record = SolutionRecord(
+                task_id=task.task_id,
+                objective=task.objective,
+                code=code,
+                specialist=specialist,
+                success=outcome.status == TaskStatus.COMPLETED,
+            )
+            self.solution_history.append(record)
+            # Trim to max history
+            if len(self.solution_history) > self.max_history:
+                self.solution_history = self.solution_history[-self.max_history:]
+
+    def get_specialist_preference(self) -> list[str]:
+        """Get specialists ordered by success rate for routing preference."""
+        if not self.specialist_stats:
+            return []
+
+        # Sort by success rate, then by total attempts (prefer more experience)
+        ranked = sorted(
+            self.specialist_stats.items(),
+            key=lambda x: (x[1].success_rate, x[1].successes + x[1].failures),
+            reverse=True,
+        )
+        return [name for name, _ in ranked]
+
+    def get_relevant_solutions(self, objective: str, limit: int = 3) -> list[SolutionRecord]:
+        """Get previous solutions relevant to the current objective."""
+        # Simple keyword matching - could be enhanced with embeddings
+        objective_words = set(objective.lower().split())
+        scored = []
+
+        for sol in self.solution_history:
+            if sol.success:  # Only consider successful solutions
+                sol_words = set(sol.objective.lower().split())
+                overlap = len(objective_words & sol_words)
+                if overlap > 0:
+                    scored.append((overlap, sol))
+
+        # Return top matches
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [sol for _, sol in scored[:limit]]
+
+    def add_message(self, role: str, content: str) -> None:
+        """Add a message to conversation history."""
+        self.messages.append({
+            "role": role,
+            "content": content,
+            "timestamp": datetime.now().isoformat(),
+        })
+
+    def get_context_summary(self) -> dict:
+        """Get summary of context for debugging/logging."""
+        return {
+            "session_id": self.session_id,
+            "total_tasks": sum(
+                s.successes + s.failures for s in self.specialist_stats.values()
+            ),
+            "specialist_stats": {
+                name: {"success_rate": f"{s.success_rate:.2%}", "total": s.successes + s.failures}
+                for name, s in self.specialist_stats.items()
+            },
+            "solutions_stored": len(self.solution_history),
+            "messages": len(self.messages),
+        }
+
+
 class LLMClient:
     """Client for Modal-hosted vLLM with adapter support."""
 
@@ -382,6 +525,7 @@ class RoutingDispatcher:
 
     v0.1: Uses structured output via prompt enforcement (hi_moe-4dy).
     Produces linear sequence of steps, executes sequentially.
+    Supports multi-turn context for specialist preference (hi_moe-ceg).
     """
 
     def __init__(
@@ -389,10 +533,12 @@ class RoutingDispatcher:
         fleet: "SpecializedFleet",
         llm: LLMClient | None = None,
         trajectory_logger: "TrajectoryLogger | None" = None,
+        conversation_context: ConversationContext | None = None,
     ):
         self.fleet = fleet
         self.llm = llm  # Optional: for structured plan generation
         self.trajectory_logger = trajectory_logger
+        self.conversation_context = conversation_context  # Multi-turn context (hi_moe-ceg)
 
     async def execute(self, task: Task) -> Outcome:
         """Route task to specialist and execute with retry logic (hi_moe-a4w)."""
@@ -450,6 +596,8 @@ class RoutingDispatcher:
             if outcome.status == TaskStatus.COMPLETED:
                 if attempt > 0:
                     logger.info(f"[Dispatcher] Succeeded with {specialist} on retry {attempt}")
+                # Record outcome to context (hi_moe-ceg)
+                self._record_outcome(task, outcome, specialist)
                 return outcome
 
             # Record error for next retry
@@ -458,12 +606,16 @@ class RoutingDispatcher:
 
         # All retries exhausted
         logger.error(f"[Dispatcher] All {config.max_retries + 1} attempts failed")
-        return Outcome(
+        final_outcome = Outcome(
             task_id=task.task_id,
             status=TaskStatus.FAILED,
             error=f"Failed after trying specialists: {tried_specialists}. Errors: {errors}",
             metadata={"tried_specialists": tried_specialists, "errors": errors},
         )
+        # Record final failure to context (hi_moe-ceg)
+        if tried_specialists:
+            self._record_outcome(task, final_outcome, tried_specialists[-1])
+        return final_outcome
 
     async def _execute_with_plan(self, task: Task) -> Outcome:
         """Execute task using LLM-generated structured plan.
@@ -646,6 +798,27 @@ class RoutingDispatcher:
             if specialist not in candidates:
                 candidates.append(specialist)
 
+        # Apply context-based preference (hi_moe-ceg)
+        # Reorder candidates based on historical success rate
+        if self.conversation_context:
+            preferred = self.conversation_context.get_specialist_preference()
+            if preferred:
+                # Boost specialists with good history to front of candidates
+                # but keep keyword-matched candidates first
+                keyword_matched = [c for c in candidates if any(
+                    s.startswith(f"{c}:") or s.endswith(f":{c}")
+                    for s in routing_signals
+                ) or c in [candidates[0]] if candidates]
+
+                # Among remaining, prefer by success rate
+                remaining = [c for c in candidates if c not in keyword_matched]
+                reordered_remaining = sorted(
+                    remaining,
+                    key=lambda x: preferred.index(x) if x in preferred else len(preferred),
+                )
+                candidates = keyword_matched + reordered_remaining
+                routing_signals.append(f"context:preferred={preferred[:3]}")
+
         # Return first non-excluded specialist
         for specialist in candidates:
             if specialist not in exclude:
@@ -653,6 +826,29 @@ class RoutingDispatcher:
 
         # All excluded, return general (shouldn't happen with proper config)
         return "general", routing_strategy, routing_signals
+
+    def _record_outcome(
+        self, task: Task, outcome: Outcome, specialist: str
+    ) -> None:
+        """Record outcome to conversation context for future routing (hi_moe-ceg)."""
+        if not self.conversation_context:
+            return
+
+        # Extract code from outcome if available
+        code = None
+        if outcome.result and isinstance(outcome.result, dict):
+            code = outcome.result.get("code")
+
+        self.conversation_context.record_outcome(
+            task=task,
+            outcome=outcome,
+            specialist=specialist,
+            code=code,
+        )
+        logger.debug(
+            f"[Dispatcher] Recorded outcome for {specialist}: "
+            f"{self.conversation_context.get_context_summary()}"
+        )
 
 
 class SpecializedFleet:
