@@ -36,7 +36,7 @@ SPECIALIST_TYPES = {
 
 
 @app.function(
-    gpu="A100-40GB",
+    gpu="A100-80GB",  # Need 80GB for QwQ-32B training
     image=training_image,
     volumes={
         DATA_PATH: data_volume,
@@ -49,9 +49,9 @@ def train_lora(
     adapter_name: str,
     train_file: str,
     eval_file: str,
-    rank: int = 32,
+    rank: int = 16,  # Reduced for memory
     epochs: int = 3,
-    batch_size: int = 4,
+    batch_size: int = 1,  # Reduced for memory
     learning_rate: float = 2e-4,
 ):
     """Train a LoRA adapter on Modal A100."""
@@ -139,7 +139,7 @@ You are a {specialist_type} specialist. Solve the problem step by step, then pro
         output_dir=output_dir,
         num_train_epochs=epochs,
         per_device_train_batch_size=batch_size,
-        gradient_accumulation_steps=8,
+        gradient_accumulation_steps=16,  # Increased to compensate for batch=1
         learning_rate=learning_rate,
         lr_scheduler_type="cosine",
         warmup_ratio=0.03,
@@ -162,7 +162,7 @@ You are a {specialist_type} specialist. Solve the problem step by step, then pro
         train_dataset=dataset["train"],
         eval_dataset=dataset["eval"],
         dataset_text_field="text",
-        max_seq_length=4096,
+        max_seq_length=1024,  # Reduced from 4096 for memory
         tokenizer=tokenizer,
     )
 

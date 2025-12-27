@@ -468,6 +468,301 @@ Constraints:
     "function_signature": "def findMedianSortedArrays(nums1: list[int], nums2: list[int]) -> float:",
 }
 
+# =============================================================================
+# Codeforces-style problems - require careful algorithmic thinking
+# =============================================================================
+
+CODEFORCES_PROBLEM_1 = {
+    "id": "range_sum_query_mutable",
+    "title": "Range Sum Query - Mutable",
+    "difficulty": "hard",
+    "statement": """
+Given an integer array nums, handle multiple queries of the following types:
+
+1. Update the value of an element in nums.
+2. Calculate the sum of elements between indices left and right inclusive.
+
+Implement the NumArray class:
+- NumArray(nums) Initializes the object with the integer array nums.
+- update(index, val) Updates the value of nums[index] to be val.
+- sumRange(left, right) Returns the sum of elements between indices left and right.
+
+IMPORTANT: A naive approach (O(n) per query) will time out. You need a data structure
+that supports both operations in O(log n) time.
+
+Consider using a Binary Indexed Tree (Fenwick Tree) or Segment Tree:
+- Fenwick Tree: Store prefix sums in a clever way using binary representation
+- Segment Tree: Build a tree where each node stores sum of a range
+
+For Fenwick Tree:
+- update(i, delta): Add delta to position i, propagate up using i += (i & -i)
+- prefix_sum(i): Sum from 0 to i, propagate down using i -= (i & -i)
+- range_sum(l, r): prefix_sum(r) - prefix_sum(l-1)
+
+Example:
+Input: ["NumArray", "sumRange", "update", "sumRange"]
+       [[[1, 3, 5]], [0, 2], [1, 2], [0, 2]]
+Output: [null, 9, null, 8]
+
+Explanation:
+NumArray numArray = new NumArray([1, 3, 5]);
+numArray.sumRange(0, 2); // return 1 + 3 + 5 = 9
+numArray.update(1, 2);   // nums = [1, 2, 5]
+numArray.sumRange(0, 2); // return 1 + 2 + 5 = 8
+
+Constraints:
+- 1 <= nums.length <= 3 * 10^4
+- -100 <= nums[i] <= 100
+- 0 <= index < nums.length
+- -100 <= val <= 100
+- 0 <= left <= right < nums.length
+- At most 3 * 10^4 calls to update and sumRange
+""",
+    "test_cases": [
+        {
+            "input": {
+                "operations": ["NumArray", "sumRange", "update", "sumRange"],
+                "args": [[[1, 3, 5]], [0, 2], [1, 2], [0, 2]]
+            },
+            "expected": [None, 9, None, 8]
+        },
+        {
+            "input": {
+                "operations": ["NumArray", "sumRange", "sumRange", "update", "sumRange"],
+                "args": [[[-1, 2, -3, 4, -5]], [0, 4], [1, 3], [2, 5], [0, 4]]
+            },
+            "expected": [None, -3, 3, None, 5]
+        },
+        {
+            "input": {
+                "operations": ["NumArray", "update", "update", "update", "sumRange"],
+                "args": [[[0, 0, 0, 0]], [0, 1], [1, 2], [2, 3], [0, 3]]
+            },
+            "expected": [None, None, None, None, 6]
+        },
+    ],
+    "function_name": "NumArray",
+    "function_signature": "class NumArray:\n    def __init__(self, nums: list[int]):\n    def update(self, index: int, val: int) -> None:\n    def sumRange(self, left: int, right: int) -> int:",
+    "validation_type": "class_operations",
+}
+
+CODEFORCES_PROBLEM_2 = {
+    "id": "longest_increasing_path",
+    "title": "Longest Increasing Path in a Matrix",
+    "difficulty": "hard",
+    "statement": """
+Given an m x n integers matrix, return the length of the longest increasing path.
+
+From each cell, you can move in four directions: left, right, up, or down.
+You may NOT move diagonally or move outside the boundary.
+
+This is a classic dynamic programming problem on a DAG:
+1. Notice that the "strictly increasing" constraint creates a DAG - no cycles possible
+2. Use DFS with memoization from each cell
+3. For each cell, try all 4 directions and take max(1 + longest_path_from_neighbor)
+4. Cache results to avoid recomputation
+
+Key insight: The increasing constraint ensures we never revisit a cell in the same path,
+so we can safely memoize without worrying about cycles.
+
+Example 1:
+Input: matrix = [[9,9,4],[6,6,8],[2,1,1]]
+Output: 4
+Explanation: The longest increasing path is [1, 2, 6, 9].
+
+Example 2:
+Input: matrix = [[3,4,5],[3,2,6],[2,2,1]]
+Output: 4
+Explanation: The longest increasing path is [3, 4, 5, 6].
+
+Example 3:
+Input: matrix = [[1]]
+Output: 1
+
+Constraints:
+- m == matrix.length
+- n == matrix[i].length
+- 1 <= m, n <= 200
+- 0 <= matrix[i][j] <= 2^31 - 1
+""",
+    "test_cases": [
+        {"input": {"matrix": [[9,9,4],[6,6,8],[2,1,1]]}, "expected": 4},
+        {"input": {"matrix": [[3,4,5],[3,2,6],[2,2,1]]}, "expected": 4},
+        {"input": {"matrix": [[1]]}, "expected": 1},
+        {"input": {"matrix": [[1,2,3],[6,5,4],[7,8,9]]}, "expected": 9},
+        {"input": {"matrix": [[7,8,9],[9,7,6],[7,2,3]]}, "expected": 6},
+    ],
+    "function_name": "longestIncreasingPath",
+    "function_signature": "def longestIncreasingPath(matrix: list[list[int]]) -> int:",
+}
+
+CODEFORCES_PROBLEM_3 = {
+    "id": "edit_distance",
+    "title": "Edit Distance",
+    "difficulty": "hard",
+    "statement": """
+Given two strings word1 and word2, return the minimum number of operations
+required to convert word1 to word2.
+
+You have three operations permitted:
+- Insert a character
+- Delete a character
+- Replace a character
+
+This is the classic Levenshtein distance problem, solvable with 2D dynamic programming:
+
+Define dp[i][j] = minimum operations to convert word1[0:i] to word2[0:j]
+
+Base cases:
+- dp[0][j] = j (insert j characters)
+- dp[i][0] = i (delete i characters)
+
+Recurrence:
+- If word1[i-1] == word2[j-1]: dp[i][j] = dp[i-1][j-1] (no operation needed)
+- Else: dp[i][j] = 1 + min(
+    dp[i-1][j],     # delete from word1
+    dp[i][j-1],     # insert into word1
+    dp[i-1][j-1]    # replace
+  )
+
+Example 1:
+Input: word1 = "horse", word2 = "ros"
+Output: 3
+Explanation:
+horse -> rorse (replace 'h' with 'r')
+rorse -> rose (remove 'r')
+rose -> ros (remove 'e')
+
+Example 2:
+Input: word1 = "intention", word2 = "execution"
+Output: 5
+Explanation:
+intention -> inention (remove 't')
+inention -> enention (replace 'i' with 'e')
+enention -> exention (replace 'n' with 'x')
+exention -> exection (replace 'n' with 'c')
+exection -> execution (insert 'u')
+
+Constraints:
+- 0 <= word1.length, word2.length <= 500
+- word1 and word2 consist of lowercase English letters
+""",
+    "test_cases": [
+        {"input": {"word1": "horse", "word2": "ros"}, "expected": 3},
+        {"input": {"word1": "intention", "word2": "execution"}, "expected": 5},
+        {"input": {"word1": "", "word2": "abc"}, "expected": 3},
+        {"input": {"word1": "abc", "word2": ""}, "expected": 3},
+        {"input": {"word1": "abc", "word2": "abc"}, "expected": 0},
+        {"input": {"word1": "dinitrophenylhydrazine", "word2": "acetylphenylhydrazine"}, "expected": 6},
+    ],
+    "function_name": "minDistance",
+    "function_signature": "def minDistance(word1: str, word2: str) -> int:",
+}
+
+CODEFORCES_PROBLEM_4 = {
+    "id": "maximal_rectangle",
+    "title": "Maximal Rectangle",
+    "difficulty": "hard",
+    "statement": """
+Given a rows x cols binary matrix filled with 0's and 1's, find the largest
+rectangle containing only 1's and return its area.
+
+This problem builds on "Largest Rectangle in Histogram":
+1. For each row, compute heights[] where heights[j] = consecutive 1s above (including current)
+2. Apply "largest rectangle in histogram" algorithm to each row's heights
+3. Track maximum area seen
+
+For "largest rectangle in histogram" (subproblem):
+- Use a monotonic stack to find, for each bar, the nearest smaller bar on left and right
+- Area for bar i = height[i] * (right_bound - left_bound - 1)
+
+Example 1:
+Input: matrix = [["1","0","1","0","0"],
+                 ["1","0","1","1","1"],
+                 ["1","1","1","1","1"],
+                 ["1","0","0","1","0"]]
+Output: 6
+Explanation: The maximal rectangle is shown in the picture (rows 2-3, cols 2-4).
+
+Example 2:
+Input: matrix = [["0"]]
+Output: 0
+
+Example 3:
+Input: matrix = [["1"]]
+Output: 1
+
+Constraints:
+- rows == matrix.length
+- cols == matrix[i].length
+- 1 <= rows, cols <= 200
+- matrix[i][j] is '0' or '1'
+""",
+    "test_cases": [
+        {"input": {"matrix": [["1","0","1","0","0"],["1","0","1","1","1"],["1","1","1","1","1"],["1","0","0","1","0"]]}, "expected": 6},
+        {"input": {"matrix": [["0"]]}, "expected": 0},
+        {"input": {"matrix": [["1"]]}, "expected": 1},
+        {"input": {"matrix": [["1","1"],["1","1"]]}, "expected": 4},
+        {"input": {"matrix": [["0","1"],["1","0"]]}, "expected": 1},
+        {"input": {"matrix": [["1","1","1","1"],["1","1","1","1"],["1","1","1","1"]]}, "expected": 12},
+    ],
+    "function_name": "maximalRectangle",
+    "function_signature": "def maximalRectangle(matrix: list[list[str]]) -> int:",
+}
+
+CODEFORCES_PROBLEM_5 = {
+    "id": "shortest_path_with_alternating_colors",
+    "title": "Shortest Path with Alternating Colors",
+    "difficulty": "hard",
+    "statement": """
+You are given an integer n, the number of nodes in a directed graph (labeled 0 to n-1).
+You are also given two 2D arrays redEdges and blueEdges where:
+- redEdges[i] = [ai, bi] means there is a directed red edge from ai to bi
+- blueEdges[i] = [ui, vi] means there is a directed blue edge from ui to vi
+
+Return an array answer of length n where answer[x] is the length of the shortest
+path from node 0 to node x such that the edge colors alternate along the path,
+or -1 if such a path does not exist.
+
+Key insight: This is a graph problem where state = (node, last_color_used).
+Use BFS with states (node, color) to find shortest alternating paths.
+
+Algorithm:
+1. Build adjacency lists for red and blue edges separately
+2. BFS from (0, red) and (0, blue) simultaneously
+3. State = (current_node, last_edge_color)
+4. From state (node, red), can only take blue edges; vice versa
+5. Track minimum distance to each node across both starting colors
+
+Example 1:
+Input: n = 3, redEdges = [[0,1],[1,2]], blueEdges = []
+Output: [0,1,-1]
+
+Example 2:
+Input: n = 3, redEdges = [[0,1]], blueEdges = [[2,1]]
+Output: [0,1,-1]
+
+Example 3:
+Input: n = 3, redEdges = [[0,1]], blueEdges = [[1,2]]
+Output: [0,1,2]
+
+Constraints:
+- 1 <= n <= 100
+- 0 <= redEdges.length, blueEdges.length <= 400
+- redEdges[i].length == blueEdges[j].length == 2
+- 0 <= ai, bi, uj, vj < n
+""",
+    "test_cases": [
+        {"input": {"n": 3, "redEdges": [[0,1],[1,2]], "blueEdges": []}, "expected": [0,1,-1]},
+        {"input": {"n": 3, "redEdges": [[0,1]], "blueEdges": [[2,1]]}, "expected": [0,1,-1]},
+        {"input": {"n": 3, "redEdges": [[0,1]], "blueEdges": [[1,2]]}, "expected": [0,1,2]},
+        {"input": {"n": 5, "redEdges": [[0,1],[1,2],[2,3],[3,4]], "blueEdges": [[1,2],[2,3],[3,1]]}, "expected": [0,1,2,3,7]},
+        {"input": {"n": 3, "redEdges": [[0,1],[0,2]], "blueEdges": [[1,0]]}, "expected": [0,1,1]},
+    ],
+    "function_name": "shortestAlternatingPaths",
+    "function_signature": "def shortestAlternatingPaths(n: int, redEdges: list[list[int]], blueEdges: list[list[int]]) -> list[int]:",
+}
+
 # Easy problems (baseline can solve, fast path applies)
 EASY_PROBLEMS = [TEST_PROBLEM, MEDIUM_PROBLEM]
 
@@ -477,5 +772,14 @@ MEDIUM_PROBLEMS = [HARD_PROBLEM_1, HARD_PROBLEM_2, HARD_PROBLEM_3]
 # Hard problems (genuinely challenging, baseline often fails)
 HARD_PROBLEMS = [VERY_HARD_PROBLEM_2, VERY_HARD_PROBLEM_3, VERY_HARD_PROBLEM_4, VERY_HARD_PROBLEM_5]
 
+# Codeforces-style problems (require advanced data structures/algorithms)
+CODEFORCES_PROBLEMS = [
+    CODEFORCES_PROBLEM_1,  # Range Sum Query - Fenwick/Segment Tree
+    CODEFORCES_PROBLEM_2,  # Longest Increasing Path - DFS + memoization
+    CODEFORCES_PROBLEM_3,  # Edit Distance - Classic DP
+    CODEFORCES_PROBLEM_4,  # Maximal Rectangle - Monotonic stack
+    CODEFORCES_PROBLEM_5,  # Alternating Colors - BFS with state
+]
+
 # All problems for full benchmark
-ALL_PROBLEMS = EASY_PROBLEMS + MEDIUM_PROBLEMS + HARD_PROBLEMS
+ALL_PROBLEMS = EASY_PROBLEMS + MEDIUM_PROBLEMS + HARD_PROBLEMS + CODEFORCES_PROBLEMS

@@ -26,6 +26,7 @@ from .test_problems import (
     HARD_PROBLEM_1,
     HARD_PROBLEM_2,
     HARD_PROBLEM_3,
+    CODEFORCES_PROBLEMS,
 )
 
 logger = logging.getLogger(__name__)
@@ -64,6 +65,7 @@ class StressTestResult:
 PROBLEM_SETS = {
     "easy": [TEST_PROBLEM, MEDIUM_PROBLEM],
     "medium": [HARD_PROBLEM_1, HARD_PROBLEM_2, HARD_PROBLEM_3],
+    "hard": CODEFORCES_PROBLEMS,  # Advanced algorithmic problems
 }
 
 
