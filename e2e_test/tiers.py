@@ -170,10 +170,13 @@ class DispatcherMemory:
 
     Tracks routing decisions and specialist outcomes so Dispatcher can
     learn which specialists work for which problem types within a run.
+
+    Supports persistence across sessions (hi_moe-ycg).
     """
     routing_history: list[dict] = field(default_factory=list)
     specialist_outcomes: dict[str, dict] = field(default_factory=dict)  # specialist -> {successes, failures}
     max_memory: int = 10
+    persist_path: str | None = None  # Path for persistence (hi_moe-ycg)
 
     def record_routing(self, task_id: str, specialist: str, problem_type: str) -> None:
         """Record a routing decision."""
@@ -185,6 +188,7 @@ class DispatcherMemory:
         })
         if len(self.routing_history) > self.max_memory:
             self.routing_history = self.routing_history[-self.max_memory:]
+        self.save()  # Auto-persist (hi_moe-ycg)
 
     def record_outcome(self, specialist: str, success: bool) -> None:
         """Record specialist execution outcome."""
@@ -194,6 +198,7 @@ class DispatcherMemory:
             self.specialist_outcomes[specialist]["successes"] += 1
         else:
             self.specialist_outcomes[specialist]["failures"] += 1
+        self.save()  # Auto-persist (hi_moe-ycg)
 
     def get_memory_prompt(self) -> str:
         """Generate context for Dispatcher prompts."""
@@ -213,6 +218,53 @@ class DispatcherMemory:
 
         return "\n".join(lines)
 
+    # Persistence methods (hi_moe-ycg)
+    def to_dict(self) -> dict:
+        """Serialize memory to dict for persistence."""
+        return {
+            "routing_history": self.routing_history,
+            "specialist_outcomes": self.specialist_outcomes,
+            "max_memory": self.max_memory,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict, persist_path: str | None = None) -> "DispatcherMemory":
+        """Load memory from dict."""
+        return cls(
+            routing_history=data.get("routing_history", []),
+            specialist_outcomes=data.get("specialist_outcomes", {}),
+            max_memory=data.get("max_memory", 10),
+            persist_path=persist_path,
+        )
+
+    def save(self) -> None:
+        """Save memory to disk."""
+        if not self.persist_path:
+            return
+        import json
+        from pathlib import Path
+        path = Path(self.persist_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(self.to_dict(), f, indent=2)
+        logger.debug(f"[DispatcherMemory] Saved to {self.persist_path}")
+
+    @classmethod
+    def load(cls, persist_path: str) -> "DispatcherMemory":
+        """Load memory from disk, or create new if not exists."""
+        import json
+        from pathlib import Path
+        path = Path(persist_path)
+        if path.exists():
+            try:
+                with open(path) as f:
+                    data = json.load(f)
+                logger.info(f"[DispatcherMemory] Loaded from {persist_path}")
+                return cls.from_dict(data, persist_path)
+            except Exception as e:
+                logger.warning(f"[DispatcherMemory] Failed to load {persist_path}: {e}")
+        return cls(persist_path=persist_path)
+
 
 @dataclass
 class FleetMemory:
@@ -220,10 +272,13 @@ class FleetMemory:
 
     Each specialist maintains its own isolated memory of execution patterns
     and common errors. Memories are keyed by specialist name.
+
+    Supports persistence across sessions (hi_moe-ycg).
     """
     # specialist_name -> list of execution records
     executions: dict[str, list[dict]] = field(default_factory=dict)
     max_per_specialist: int = 5
+    persist_path: str | None = None  # Path for persistence (hi_moe-ycg)
 
     def record_execution(
         self,
@@ -248,6 +303,7 @@ class FleetMemory:
         # Trim to max
         if len(self.executions[specialist]) > self.max_per_specialist:
             self.executions[specialist] = self.executions[specialist][-self.max_per_specialist:]
+        self.save()  # Auto-persist (hi_moe-ycg)
 
     def get_memory_prompt(self, specialist: str) -> str:
         """Generate context for a specific specialist's prompt."""
@@ -281,6 +337,51 @@ class FleetMemory:
             "successes": sum(1 for e in history if e["success"]),
             "failures": sum(1 for e in history if not e["success"]),
         }
+
+    # Persistence methods (hi_moe-ycg)
+    def to_dict(self) -> dict:
+        """Serialize memory to dict for persistence."""
+        return {
+            "executions": self.executions,
+            "max_per_specialist": self.max_per_specialist,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict, persist_path: str | None = None) -> "FleetMemory":
+        """Load memory from dict."""
+        return cls(
+            executions=data.get("executions", {}),
+            max_per_specialist=data.get("max_per_specialist", 5),
+            persist_path=persist_path,
+        )
+
+    def save(self) -> None:
+        """Save memory to disk."""
+        if not self.persist_path:
+            return
+        import json
+        from pathlib import Path
+        path = Path(self.persist_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(self.to_dict(), f, indent=2)
+        logger.debug(f"[FleetMemory] Saved to {self.persist_path}")
+
+    @classmethod
+    def load(cls, persist_path: str) -> "FleetMemory":
+        """Load memory from disk, or create new if not exists."""
+        import json
+        from pathlib import Path
+        path = Path(persist_path)
+        if path.exists():
+            try:
+                with open(path) as f:
+                    data = json.load(f)
+                logger.info(f"[FleetMemory] Loaded from {persist_path}")
+                return cls.from_dict(data, persist_path)
+            except Exception as e:
+                logger.warning(f"[FleetMemory] Failed to load {persist_path}: {e}")
+        return cls(persist_path=persist_path)
 
 
 @dataclass

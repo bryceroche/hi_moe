@@ -27,6 +27,8 @@ from typing import Any, Callable
 from .tiers import (
     AbstractArchitect,
     ArchitectMemory,
+    DispatcherMemory,
+    FleetMemory,
     LLMClient,
     MockLLMClient,
     Outcome,
@@ -133,6 +135,7 @@ class Runner:
         enable_trajectory_logging: bool = True,
         enable_fast_path: bool = True,
         enable_training_db: bool = True,
+        enable_memory_persistence: bool = True,
     ):
         """Initialize the Runner.
 
@@ -144,6 +147,7 @@ class Runner:
             enable_trajectory_logging: Enable detailed vLLM call logging (hi_moe-iz9)
             enable_fast_path: Enable tier-skip for simple problems (hi_moe-00z)
             enable_training_db: Enable SQLite training data logging (hi_moe-828)
+            enable_memory_persistence: Enable persistent agent memory (hi_moe-ycg)
         """
         self.retry_config = retry_config or RetryConfig()
         self.log_dir = Path(log_dir) if log_dir else Path("./runs")
@@ -151,12 +155,23 @@ class Runner:
         self.enable_trajectory_logging = enable_trajectory_logging
         self.enable_fast_path = enable_fast_path
         self.enable_training_db = enable_training_db
+        self.enable_memory_persistence = enable_memory_persistence
 
         # Initialize training data DB (hi_moe-828)
         self.call_db: CallDB | None = None
         if enable_training_db:
             self.call_db = CallDB(self.log_dir / "hi_moe.db")
             logger.info(f"[Runner] Training DB enabled at {self.log_dir / 'hi_moe.db'}")
+
+        # Initialize persistent agent memories (hi_moe-ycg)
+        memory_dir = self.log_dir / "memory"
+        if enable_memory_persistence:
+            self.dispatcher_memory = DispatcherMemory.load(str(memory_dir / "dispatcher.json"))
+            self.fleet_memory = FleetMemory.load(str(memory_dir / "fleet.json"))
+            logger.info(f"[Runner] Memory persistence enabled at {memory_dir}")
+        else:
+            self.dispatcher_memory = DispatcherMemory()
+            self.fleet_memory = FleetMemory()
 
         # Set up trajectory logging if enabled
         self.trajectory_logger: TrajectoryLogger | None = None
@@ -170,16 +185,19 @@ class Runner:
 
         # Initialize tiers with (potentially wrapped) LLM and trajectory logger (hi_moe-r8q)
         # Wire CodeRunner to Fleet for self-healing (hi_moe-ld8)
+        # Wire persistent memories (hi_moe-ycg)
         self.fleet = SpecializedFleet(
             self.llm,
             trajectory_logger=self.trajectory_logger,
             code_runner=self.code_runner,
+            memory=self.fleet_memory,
         )
         self.dispatcher = RoutingDispatcher(
             self.fleet,
             self.llm,
             trajectory_logger=self.trajectory_logger,
             call_db=self.call_db,  # Wire call_db for routing decision logging (hi_moe-ehx)
+            memory=self.dispatcher_memory,
         )
         self.architect = AbstractArchitect(self.dispatcher, self.llm, trajectory_logger=self.trajectory_logger)
         self.monitor = ProgressMonitor(self.architect)
