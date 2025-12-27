@@ -1,4 +1,4 @@
-"""Evaluate adapter quality by running benchmark problems."""
+"""Evaluate hi_moe system - tier routing vs raw adapter comparison."""
 from __future__ import annotations
 
 import modal
@@ -17,7 +17,7 @@ eval_image = (
 @app.function(
     image=eval_image,
     volumes={DATA_PATH: data_volume},
-    timeout=1800,
+    timeout=3600,  # 1 hour for full evaluation
 )
 def evaluate_adapter(
     endpoint: str,
@@ -25,17 +25,12 @@ def evaluate_adapter(
     eval_file: str,
     max_samples: int = 20,
 ) -> dict:
-    """Evaluate an adapter on a benchmark dataset.
-
-    Returns metrics like pass rate and average response quality.
-    """
+    """Evaluate a single adapter on benchmark problems."""
     import json
     import httpx
     import time
 
-    # Load eval data from volume
     eval_path = f"{DATA_PATH}/{eval_file}"
-
     results = []
     total_time = 0
 
@@ -48,9 +43,9 @@ def evaluate_adapter(
             problem = example["problem"]
             expected_domain = example["domain"]
 
-            # Generate response
             start = time.time()
             try:
+                # 5 minute timeout for QwQ reasoning model
                 response = httpx.post(
                     f"{endpoint}/v1/chat/completions",
                     json={
@@ -62,7 +57,7 @@ def evaluate_adapter(
                         "max_tokens": 1024,
                         "temperature": 0.2,
                     },
-                    timeout=120,
+                    timeout=300.0,  # 5 minutes for QwQ
                 )
                 elapsed = time.time() - start
                 total_time += elapsed
@@ -82,6 +77,7 @@ def evaluate_adapter(
                         "completion_tokens": usage.get("completion_tokens", 0),
                         "elapsed_seconds": elapsed,
                     })
+                    print(f"  [{adapter}] Problem {i}: OK ({elapsed:.1f}s)")
                 else:
                     results.append({
                         "problem_idx": i,
@@ -90,6 +86,7 @@ def evaluate_adapter(
                         "error": f"HTTP {response.status_code}",
                         "elapsed_seconds": elapsed,
                     })
+                    print(f"  [{adapter}] Problem {i}: FAIL HTTP {response.status_code}")
 
             except Exception as e:
                 elapsed = time.time() - start
@@ -97,11 +94,11 @@ def evaluate_adapter(
                     "problem_idx": i,
                     "domain": expected_domain,
                     "success": False,
-                    "error": str(e),
+                    "error": str(e)[:100],
                     "elapsed_seconds": elapsed,
                 })
+                print(f"  [{adapter}] Problem {i}: ERROR {str(e)[:50]}")
 
-    # Compute metrics
     successes = [r for r in results if r["success"]]
     failures = [r for r in results if not r["success"]]
 
@@ -114,8 +111,6 @@ def evaluate_adapter(
         "avg_response_time": total_time / len(results) if results else 0,
         "code_generation_rate": sum(1 for r in successes if r.get("has_code")) / len(successes) if successes else 0,
         "avg_output_length": sum(r.get("output_length", 0) for r in successes) / len(successes) if successes else 0,
-        "avg_prompt_tokens": sum(r.get("prompt_tokens", 0) for r in successes) / len(successes) if successes else 0,
-        "avg_completion_tokens": sum(r.get("completion_tokens", 0) for r in successes) / len(successes) if successes else 0,
     }
 
     return {"metrics": metrics, "results": results}
@@ -124,27 +119,36 @@ def evaluate_adapter(
 @app.function(
     image=eval_image,
     volumes={DATA_PATH: data_volume},
-    timeout=3600,
+    timeout=7200,  # 2 hours for parallel evaluation
 )
-def compare_adapters(
+def compare_adapters_parallel(
     endpoint: str,
     adapters: list[str],
-    eval_files: list[str],
+    eval_file: str,
     max_samples: int = 10,
 ) -> dict:
-    """Compare multiple adapters across multiple eval datasets."""
-    comparisons = []
+    """Compare adapters in PARALLEL - much faster than sequential."""
+    print(f"Evaluating {len(adapters)} adapters in parallel on {eval_file}...")
 
+    # Spawn all adapter evaluations concurrently
+    handles = []
     for adapter in adapters:
-        for eval_file in eval_files:
-            print(f"Evaluating {adapter} on {eval_file}...")
-            result = evaluate_adapter.remote(
-                endpoint=endpoint,
-                adapter=adapter,
-                eval_file=eval_file,
-                max_samples=max_samples,
-            )
-            comparisons.append(result["metrics"])
+        print(f"  Spawning evaluation for {adapter}...")
+        handle = evaluate_adapter.spawn(
+            endpoint=endpoint,
+            adapter=adapter,
+            eval_file=eval_file,
+            max_samples=max_samples,
+        )
+        handles.append((adapter, handle))
+
+    # Collect results as they complete
+    comparisons = []
+    for adapter, handle in handles:
+        print(f"  Waiting for {adapter}...")
+        result = handle.get()
+        comparisons.append(result["metrics"])
+        print(f"  {adapter}: {result['metrics']['success_rate']:.1%} success")
 
     return {"comparisons": comparisons}
 
@@ -154,23 +158,23 @@ def main(
     endpoint: str = "https://bryce-roche--hi-moe-inference-vllmserver-serve.modal.run",
     adapter: str = "base",
     eval_file: str = "python_eval.jsonl",
-    max_samples: int = 10,
+    max_samples: int = 3,
     compare: bool = False,
+    parallel: bool = True,
 ):
     """Evaluate adapter performance.
 
     Examples:
-        # Evaluate base model on Python
-        modal run modal_app/evaluate.py --adapter=base --eval-file=python_eval.jsonl
+        # Quick single adapter test (1 sample)
+        modal run modal_app/evaluate.py --adapter=base --max-samples=1
 
-        # Evaluate custom adapter
-        modal run modal_app/evaluate.py --adapter=python-test --eval-file=python_eval.jsonl
+        # Compare all adapters in parallel (fast!)
+        modal run modal_app/evaluate.py --compare --parallel --max-samples=3
 
-        # Compare base vs adapter
-        modal run modal_app/evaluate.py --compare
+        # Compare adapters sequentially (slow, for debugging)
+        modal run modal_app/evaluate.py --compare --no-parallel --max-samples=3
     """
     if compare:
-        # Compare base vs all available adapters
         import httpx
 
         # Get available adapters
@@ -180,31 +184,48 @@ def main(
         except Exception:
             models = ["base"]
 
-        eval_files = ["python_eval.jsonl"]
-
         print(f"Comparing adapters: {models}")
-        print(f"Eval files: {eval_files}")
+        print(f"Eval file: {eval_file}")
+        print(f"Max samples: {max_samples}")
+        print(f"Mode: {'parallel' if parallel else 'sequential'}")
+        print()
 
-        result = compare_adapters.remote(
-            endpoint=endpoint,
-            adapters=models,
-            eval_files=eval_files,
-            max_samples=max_samples,
-        )
+        if parallel:
+            result = compare_adapters_parallel.remote(
+                endpoint=endpoint,
+                adapters=models,
+                eval_file=eval_file,
+                max_samples=max_samples,
+            )
+        else:
+            # Sequential fallback
+            comparisons = []
+            for model in models:
+                print(f"Evaluating {model}...")
+                r = evaluate_adapter.remote(
+                    endpoint=endpoint,
+                    adapter=model,
+                    eval_file=eval_file,
+                    max_samples=max_samples,
+                )
+                comparisons.append(r["metrics"])
+            result = {"comparisons": comparisons}
 
-        print("\n=== Comparison Results ===\n")
+        print("\n" + "=" * 50)
+        print("COMPARISON RESULTS")
+        print("=" * 50 + "\n")
+
         for metrics in result["comparisons"]:
             print(f"Adapter: {metrics['adapter']}")
-            print(f"  Eval: {metrics['eval_file']}")
             print(f"  Success Rate: {metrics['success_rate']:.1%}")
             print(f"  Code Gen Rate: {metrics['code_generation_rate']:.1%}")
-            print(f"  Avg Response Time: {metrics['avg_response_time']:.2f}s")
+            print(f"  Avg Response Time: {metrics['avg_response_time']:.1f}s")
             print(f"  Avg Output Length: {metrics['avg_output_length']:.0f} chars")
             print()
 
     else:
         # Single adapter evaluation
-        print(f"Evaluating {adapter} on {eval_file}...")
+        print(f"Evaluating {adapter} on {eval_file} ({max_samples} samples)...")
         result = evaluate_adapter.remote(
             endpoint=endpoint,
             adapter=adapter,
@@ -213,13 +234,12 @@ def main(
         )
 
         metrics = result["metrics"]
-        print("\n=== Evaluation Results ===\n")
+        print("\n" + "=" * 50)
+        print("EVALUATION RESULTS")
+        print("=" * 50 + "\n")
         print(f"Adapter: {metrics['adapter']}")
-        print(f"Eval File: {metrics['eval_file']}")
         print(f"Samples: {metrics['total_samples']}")
         print(f"Success Rate: {metrics['success_rate']:.1%}")
         print(f"Code Generation Rate: {metrics['code_generation_rate']:.1%}")
-        print(f"Avg Response Time: {metrics['avg_response_time']:.2f}s")
+        print(f"Avg Response Time: {metrics['avg_response_time']:.1f}s")
         print(f"Avg Output Length: {metrics['avg_output_length']:.0f} chars")
-        print(f"Avg Prompt Tokens: {metrics['avg_prompt_tokens']:.0f}")
-        print(f"Avg Completion Tokens: {metrics['avg_completion_tokens']:.0f}")
