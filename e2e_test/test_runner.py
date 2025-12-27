@@ -219,3 +219,77 @@ class TestCreateRunner:
         with tempfile.TemporaryDirectory() as tmpdir:
             runner = await create_runner(mock=True, log_dir=tmpdir)
             assert runner.log_dir == Path(tmpdir)
+
+
+class TestRoutingStrategy:
+    """Tests for routing strategy detection (hi_moe-gr7)."""
+
+    def test_math_first_detection(self):
+        """Test math-first strategy detected for algorithm tasks."""
+        from .tiers import RoutingDispatcher, SpecializedFleet, MockLLMClient, Task
+
+        fleet = SpecializedFleet(MockLLMClient())
+        dispatcher = RoutingDispatcher(fleet)
+
+        task = Task(
+            task_id="test-1",
+            objective="Implement an optimal algorithm for sorting",
+        )
+        specialist, strategy, signals = dispatcher._select_specialist(task)
+
+        assert strategy == "math_first"
+        assert "math:algorithm" in signals or "math:optimal" in signals
+
+    def test_python_direct_detection(self):
+        """Test python-direct strategy for implementation tasks."""
+        from .tiers import RoutingDispatcher, SpecializedFleet, MockLLMClient, Task
+
+        fleet = SpecializedFleet(MockLLMClient())
+        dispatcher = RoutingDispatcher(fleet)
+
+        task = Task(
+            task_id="test-2",
+            objective="Write a Python function that adds two numbers",
+        )
+        specialist, strategy, signals = dispatcher._select_specialist(task)
+
+        assert strategy == "python_direct"
+        assert "python:python" in signals or "python:function" in signals or "python:write" in signals
+
+    def test_signals_track_keywords(self):
+        """Test that routing signals capture matched keywords."""
+        from .tiers import RoutingDispatcher, SpecializedFleet, MockLLMClient, Task
+
+        fleet = SpecializedFleet(MockLLMClient())
+        dispatcher = RoutingDispatcher(fleet)
+
+        # Task with only debug keywords (no code/python)
+        task = Task(
+            task_id="test-3",
+            objective="Fix the bug in the application",
+        )
+        specialist, strategy, signals = dispatcher._select_specialist(task)
+
+        assert "debug:fix" in signals or "debug:bug" in signals
+        assert specialist == "debugging"
+
+    def test_mixed_signals_priority(self):
+        """Test priority when multiple keyword types match."""
+        from .tiers import RoutingDispatcher, SpecializedFleet, MockLLMClient, Task
+
+        fleet = SpecializedFleet(MockLLMClient())
+        dispatcher = RoutingDispatcher(fleet)
+
+        # Math comes first in processing, so it should be selected
+        task = Task(
+            task_id="test-4",
+            objective="Analyze the algorithm complexity and implement in Python",
+        )
+        specialist, strategy, signals = dispatcher._select_specialist(task)
+
+        # Should have both math and python signals
+        assert any("math:" in s for s in signals)
+        assert any("python:" in s for s in signals)
+        # Math should win because it's processed first
+        assert specialist == "math"
+        assert strategy == "math_first"

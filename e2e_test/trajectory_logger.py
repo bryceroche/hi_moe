@@ -99,6 +99,9 @@ class DispatcherRecord:
     rationale: str | None = None  # Why this routing was chosen
     specialist: str | None = None  # Single specialist if heuristic
     context_summary: str | None = None  # Relevant context for decision
+    # Routing strategy fields (hi_moe-gr7)
+    routing_strategy: str | None = None  # "math_first" or "python_direct"
+    routing_signals: list[str] | None = None  # Signals that led to strategy choice
     outcome_status: str | None = None  # completed/failed
     outcome_error: str | None = None  # Error if failed
     metadata: dict = field(default_factory=dict)
@@ -594,6 +597,10 @@ def compute_tier_stats(records: list[dict]) -> dict:
     structured_routing = sum(1 for r in dispatcher if r.get("routing_decision") == "structured_plan")
     heuristic_routing = sum(1 for r in dispatcher if r.get("routing_decision") == "heuristic")
 
+    # Routing strategy breakdown (hi_moe-gr7)
+    math_first_count = sum(1 for r in dispatcher if r.get("routing_strategy") == "math_first")
+    python_direct_count = sum(1 for r in dispatcher if r.get("routing_strategy") == "python_direct")
+
     # Specialist usage
     specialist_counts = {}
     for r in fleet:
@@ -607,6 +614,9 @@ def compute_tier_stats(records: list[dict]) -> dict:
         "dispatcher_success_rate": success_rate(dispatcher),
         "structured_routing_count": structured_routing,
         "heuristic_routing_count": heuristic_routing,
+        # Routing strategy stats (hi_moe-gr7)
+        "math_first_count": math_first_count,
+        "python_direct_count": python_direct_count,
         "fleet_executions": len(fleet),
         "fleet_success_rate": success_rate(fleet),
         "specialist_usage": specialist_counts,
@@ -653,6 +663,9 @@ def extract_training_pairs(records: list[dict], tier: str) -> list[dict]:
                         "routing_decision": r.get("routing_decision"),
                         "plan_steps": r.get("plan_steps"),
                         "rationale": r.get("rationale"),
+                        # Routing strategy (hi_moe-gr7)
+                        "routing_strategy": r.get("routing_strategy"),
+                        "routing_signals": r.get("routing_signals"),
                     },
                 })
 

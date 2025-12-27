@@ -414,11 +414,16 @@ class RoutingDispatcher:
 
         for attempt in range(config.max_retries + 1):
             # Select specialist (try different one on retry)
-            specialist = self._select_specialist(task, exclude=tried_specialists)
+            specialist, routing_strategy, routing_signals = self._select_specialist(
+                task, exclude=tried_specialists
+            )
             tried_specialists.append(specialist)
-            logger.info(f"[Dispatcher] Selected specialist: {specialist} (attempt {attempt + 1})")
+            logger.info(
+                f"[Dispatcher] Selected specialist: {specialist} "
+                f"(strategy: {routing_strategy}, signals: {routing_signals}, attempt {attempt + 1})"
+            )
 
-            # Log heuristic routing decision (hi_moe-r8q)
+            # Log heuristic routing decision (hi_moe-r8q, hi_moe-gr7)
             if self.trajectory_logger:
                 from .trajectory_logger import DispatcherRecord
                 dispatcher_record = DispatcherRecord(
@@ -429,6 +434,9 @@ class RoutingDispatcher:
                     specialist=specialist,
                     rationale=f"Heuristic keyword match selected {specialist} (attempt {attempt + 1})",
                     context_summary=str(task.context)[:200] if task.context else None,
+                    # Routing strategy fields (hi_moe-gr7)
+                    routing_strategy=routing_strategy,
+                    routing_signals=routing_signals,
                 )
 
             outcome = await self.fleet.execute(task, specialist)
@@ -475,7 +483,20 @@ class RoutingDispatcher:
         # Prepare plan steps for logging
         plan_steps = [{"description": s.description, "specialist": s.specialist} for s in plan.steps]
 
-        # Log structured plan routing decision (hi_moe-r8q)
+        # Detect routing strategy from plan structure (hi_moe-gr7)
+        # If first step is math/analysis, it's math_first; otherwise python_direct
+        first_specialist = plan.steps[0].specialist if plan.steps else "python"
+        routing_strategy = "math_first" if first_specialist == "math" else "python_direct"
+        routing_signals = [f"plan_first_step:{first_specialist}"]
+        for step in plan.steps:
+            routing_signals.append(f"step:{step.specialist}")
+
+        logger.info(
+            f"[Dispatcher] Plan strategy: {routing_strategy} "
+            f"(signals: {routing_signals})"
+        )
+
+        # Log structured plan routing decision (hi_moe-r8q, hi_moe-gr7)
         if self.trajectory_logger:
             from .trajectory_logger import DispatcherRecord
             dispatcher_record = DispatcherRecord(
@@ -486,6 +507,9 @@ class RoutingDispatcher:
                 plan_steps=plan_steps,
                 rationale=f"LLM generated {len(plan.steps)}-step plan",
                 context_summary=str(task.context)[:200] if task.context else None,
+                # Routing strategy fields (hi_moe-gr7)
+                routing_strategy=routing_strategy,
+                routing_signals=routing_signals,
             )
 
         # Execute steps sequentially
@@ -560,27 +584,62 @@ class RoutingDispatcher:
 
         return final_outcome
 
-    def _select_specialist(self, task: Task, exclude: list[str] | None = None) -> str:
+    def _select_specialist(
+        self, task: Task, exclude: list[str] | None = None
+    ) -> tuple[str, str, list[str]]:
         """Select specialist based on task content (heuristic fallback).
 
         Args:
             task: Task to route
             exclude: List of specialists to exclude (already tried)
+
+        Returns:
+            Tuple of (specialist, routing_strategy, routing_signals)
+            - routing_strategy: "math_first" or "python_direct"
+            - routing_signals: Keywords that influenced the decision
         """
         exclude = exclude or []
         objective_lower = task.objective.lower()
 
-        # Priority order of specialists to try
+        # Track routing signals (hi_moe-gr7)
+        routing_signals = []
         candidates = []
 
-        if any(kw in objective_lower for kw in ["python", "code", "implement", "function"]):
-            candidates.append("python")
-        if any(kw in objective_lower for kw in ["math", "algorithm", "proof"]):
+        # Math/algorithm keywords suggest analysis-first approach
+        math_keywords = ["math", "algorithm", "proof", "optimal", "complexity", "theorem"]
+        math_matches = [kw for kw in math_keywords if kw in objective_lower]
+        if math_matches:
             candidates.append("math")
-        if any(kw in objective_lower for kw in ["debug", "fix", "error", "bug"]):
+            routing_signals.extend([f"math:{kw}" for kw in math_matches])
+
+        # Python/code keywords suggest direct implementation
+        python_keywords = ["python", "code", "implement", "function", "write", "create"]
+        python_matches = [kw for kw in python_keywords if kw in objective_lower]
+        if python_matches:
+            candidates.append("python")
+            routing_signals.extend([f"python:{kw}" for kw in python_matches])
+
+        # Debugging keywords
+        debug_keywords = ["debug", "fix", "error", "bug"]
+        debug_matches = [kw for kw in debug_keywords if kw in objective_lower]
+        if debug_matches:
             candidates.append("debugging")
-        if any(kw in objective_lower for kw in ["refactor", "clean", "improve"]):
+            routing_signals.extend([f"debug:{kw}" for kw in debug_matches])
+
+        # Refactoring keywords
+        refactor_keywords = ["refactor", "clean", "improve"]
+        refactor_matches = [kw for kw in refactor_keywords if kw in objective_lower]
+        if refactor_matches:
             candidates.append("refactoring")
+            routing_signals.extend([f"refactor:{kw}" for kw in refactor_matches])
+
+        # Determine routing strategy (hi_moe-gr7)
+        # math_first: math signals detected, suggests analysis before coding
+        # python_direct: no math signals, or python signals came first
+        if math_matches and (not python_matches or candidates[0] == "math"):
+            routing_strategy = "math_first"
+        else:
+            routing_strategy = "python_direct"
 
         # Add all valid specialists as fallbacks
         for specialist in VALID_SPECIALISTS:
@@ -590,10 +649,10 @@ class RoutingDispatcher:
         # Return first non-excluded specialist
         for specialist in candidates:
             if specialist not in exclude:
-                return specialist
+                return specialist, routing_strategy, routing_signals
 
         # All excluded, return general (shouldn't happen with proper config)
-        return "general"
+        return "general", routing_strategy, routing_signals
 
 
 class SpecializedFleet:
