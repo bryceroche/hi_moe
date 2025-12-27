@@ -175,7 +175,12 @@ class Runner:
             trajectory_logger=self.trajectory_logger,
             code_runner=self.code_runner,
         )
-        self.dispatcher = RoutingDispatcher(self.fleet, self.llm, trajectory_logger=self.trajectory_logger)
+        self.dispatcher = RoutingDispatcher(
+            self.fleet,
+            self.llm,
+            trajectory_logger=self.trajectory_logger,
+            call_db=self.call_db,  # Wire call_db for routing decision logging (hi_moe-ehx)
+        )
         self.architect = AbstractArchitect(self.dispatcher, self.llm, trajectory_logger=self.trajectory_logger)
         self.monitor = ProgressMonitor(self.architect)
 

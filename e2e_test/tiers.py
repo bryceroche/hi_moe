@@ -26,6 +26,7 @@ from .learned_router import LearnedRouter, HybridRouter
 
 if TYPE_CHECKING:
     from .trajectory_logger import TrajectoryLogger
+    from .call_db import CallDB
 
 logger = logging.getLogger(__name__)
 
@@ -763,6 +764,7 @@ class RoutingDispatcher:
         conversation_context: ConversationContext | None = None,
         learned_router: LearnedRouter | None = None,
         memory: DispatcherMemory | None = None,
+        call_db: "CallDB | None" = None,
     ):
         self.fleet = fleet
         self.llm = llm  # Optional: for structured plan generation
@@ -770,6 +772,7 @@ class RoutingDispatcher:
         self.conversation_context = conversation_context  # Multi-turn context (hi_moe-ceg)
         self.learned_router = learned_router  # Optional: learned routing (hi_moe-bh3)
         self.memory = memory or DispatcherMemory()  # Per-run memory (hi_moe-mz5)
+        self.call_db = call_db  # Optional: for routing decision logging (hi_moe-ehx)
 
     async def execute(self, task: Task) -> Outcome:
         """Route task to specialist and execute with retry logic (hi_moe-a4w)."""
@@ -809,6 +812,22 @@ class RoutingDispatcher:
                 f"(strategy: {routing_strategy}, signals: {routing_signals}, attempt {attempt + 1})"
             )
 
+            # Log routing decision to training DB (hi_moe-ehx)
+            run_id = task.context.get("run_id") if task.context else None
+            problem_id = task.context.get("problem_id") if task.context else None
+            if self.call_db and run_id:
+                # Extract keywords from routing signals
+                keywords = [s.split(":")[-1] for s in routing_signals if ":" in s]
+                alternatives = [s for s in tried_specialists if s != specialist]
+                self.call_db.log_routing_decision(
+                    run_id=run_id,
+                    problem_id=problem_id or task.task_id,
+                    selected_specialist=specialist,
+                    confidence=0.7 if attempt == 0 else 0.5,  # Lower confidence on retries
+                    problem_keywords=keywords,
+                    alternative_specialists=alternatives,
+                )
+
             # Log heuristic routing decision (hi_moe-r8q, hi_moe-gr7)
             if self.trajectory_logger:
                 from .trajectory_logger import DispatcherRecord
@@ -838,6 +857,12 @@ class RoutingDispatcher:
                     logger.info(f"[Dispatcher] Succeeded with {specialist} on retry {attempt}")
                 # Record outcome to context (hi_moe-ceg)
                 self._record_outcome(task, outcome, specialist)
+                # Update routing outcome in training DB (hi_moe-ehx)
+                if self.call_db and run_id:
+                    self.call_db.update_routing_outcome(
+                        run_id=run_id,
+                        decision_correct=True,
+                    )
                 return outcome
 
             # Record error for next retry
@@ -855,6 +880,13 @@ class RoutingDispatcher:
         # Record final failure to context (hi_moe-ceg)
         if tried_specialists:
             self._record_outcome(task, final_outcome, tried_specialists[-1])
+        # Update routing outcome in training DB (hi_moe-ehx)
+        if self.call_db and run_id:
+            self.call_db.update_routing_outcome(
+                run_id=run_id,
+                decision_correct=False,
+                actual_specialist_needed=None,  # Unknown - all failed
+            )
         return final_outcome
 
     async def _execute_with_plan(self, task: Task, memory_context: str = "") -> Outcome:
@@ -903,6 +935,22 @@ class RoutingDispatcher:
                 # Routing strategy fields (hi_moe-gr7)
                 routing_strategy=routing_strategy,
                 routing_signals=routing_signals,
+            )
+
+        # Log routing decision to training DB (hi_moe-ehx)
+        run_id = task.context.get("run_id") if task.context else None
+        problem_id = task.context.get("problem_id") if task.context else None
+        if self.call_db and run_id:
+            # First specialist in the plan is the primary routing decision
+            primary_specialist = plan.steps[0].specialist if plan.steps else "python"
+            all_specialists = list({s.specialist for s in plan.steps})
+            self.call_db.log_routing_decision(
+                run_id=run_id,
+                problem_id=problem_id or task.task_id,
+                selected_specialist=primary_specialist,
+                confidence=0.8,  # Higher confidence for LLM-planned routes
+                problem_keywords=routing_signals,
+                alternative_specialists=[s for s in all_specialists if s != primary_specialist],
             )
 
         # Execute steps sequentially
@@ -962,6 +1010,14 @@ class RoutingDispatcher:
                     dispatcher_record.outcome_status = final_outcome.status.value
                     dispatcher_record.outcome_error = final_outcome.error
                     self.trajectory_logger.log_dispatcher(dispatcher_record)
+
+                # Update routing outcome in training DB (hi_moe-ehx)
+                if self.call_db and run_id:
+                    self.call_db.update_routing_outcome(
+                        run_id=run_id,
+                        decision_correct=False,
+                        actual_specialist_needed=step.specialist,  # Failed specialist
+                    )
 
                 return final_outcome
 
