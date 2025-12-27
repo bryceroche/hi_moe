@@ -15,6 +15,13 @@ from .dispatcher_schema import (
     get_dispatcher_plan,
     VALID_SPECIALISTS,
 )
+from .outcome_schema import (
+    FleetResult,
+    DispatcherResult,
+    StepResult,
+    ValidationSummary,
+    OutcomeEvaluation,
+)
 
 if TYPE_CHECKING:
     from .trajectory_logger import TrajectoryLogger
@@ -834,9 +841,11 @@ class RoutingDispatcher:
         if not self.conversation_context:
             return
 
-        # Extract code from outcome if available
+        # Extract code from outcome if available (hi_moe-qwo)
         code = None
-        if outcome.result and isinstance(outcome.result, dict):
+        if isinstance(outcome.result, FleetResult):
+            code = outcome.result.code
+        elif outcome.result and isinstance(outcome.result, dict):
             code = outcome.result.get("code")
 
         self.conversation_context.record_outcome(
@@ -996,10 +1005,17 @@ class SpecializedFleet:
                             )
                             self.trajectory_logger.log_fleet(fleet_record)
 
+                        # Build FleetResult for failed validation (hi_moe-qwo)
+                        failed_result = FleetResult(
+                            code=code,
+                            validation=ValidationSummary.from_validation_dict(validation_result),
+                            specialist=specialist,
+                            adapter=adapter,
+                        )
                         return Outcome(
                             task_id=task.task_id,
                             status=TaskStatus.FAILED,
-                            result={"code": code, "validation": validation_result},
+                            result=failed_result,
                             error=error_feedback,
                             metadata={"specialist": specialist, "adapter": adapter},
                         )
@@ -1008,10 +1024,19 @@ class SpecializedFleet:
                     logger.error(f"[Fleet] Code validation error: {e}")
                     # Continue without validation on error
 
+            # Build structured FleetResult (hi_moe-qwo)
+            fleet_result = FleetResult(
+                code=code,
+                raw_response=response,
+                validation=ValidationSummary.from_validation_dict(validation_result),
+                specialist=specialist,
+                adapter=adapter,
+            )
+
             outcome = Outcome(
                 task_id=task.task_id,
                 status=TaskStatus.COMPLETED,
-                result={"code": code, "raw_response": response, "validation": validation_result},
+                result=fleet_result,
                 metadata={"specialist": specialist, "adapter": adapter},
             )
 
