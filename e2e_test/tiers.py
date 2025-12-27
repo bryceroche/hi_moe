@@ -164,6 +164,125 @@ class ArchitectMemory:
 
 
 @dataclass
+class DispatcherMemory:
+    """Per-run memory for Dispatcher tier (hi_moe-mz5).
+
+    Tracks routing decisions and specialist outcomes so Dispatcher can
+    learn which specialists work for which problem types within a run.
+    """
+    routing_history: list[dict] = field(default_factory=list)
+    specialist_outcomes: dict[str, dict] = field(default_factory=dict)  # specialist -> {successes, failures}
+    max_memory: int = 10
+
+    def record_routing(self, task_id: str, specialist: str, problem_type: str) -> None:
+        """Record a routing decision."""
+        self.routing_history.append({
+            "task_id": task_id,
+            "specialist": specialist,
+            "problem_type": problem_type,
+            "timestamp": datetime.now().isoformat(),
+        })
+        if len(self.routing_history) > self.max_memory:
+            self.routing_history = self.routing_history[-self.max_memory:]
+
+    def record_outcome(self, specialist: str, success: bool) -> None:
+        """Record specialist execution outcome."""
+        if specialist not in self.specialist_outcomes:
+            self.specialist_outcomes[specialist] = {"successes": 0, "failures": 0}
+        if success:
+            self.specialist_outcomes[specialist]["successes"] += 1
+        else:
+            self.specialist_outcomes[specialist]["failures"] += 1
+
+    def get_memory_prompt(self) -> str:
+        """Generate context for Dispatcher prompts."""
+        if not self.specialist_outcomes:
+            return ""
+
+        lines = ["\n\n--- Specialist Performance This Run ---"]
+        for spec, stats in self.specialist_outcomes.items():
+            total = stats["successes"] + stats["failures"]
+            rate = stats["successes"] / total if total > 0 else 0
+            lines.append(f"  {spec}: {rate:.0%} success ({stats['successes']}/{total})")
+
+        if self.routing_history:
+            lines.append("\nRecent routing decisions:")
+            for r in self.routing_history[-3:]:
+                lines.append(f"  {r['problem_type']} → {r['specialist']}")
+
+        return "\n".join(lines)
+
+
+@dataclass
+class FleetMemory:
+    """Per-specialist memory for Fleet tier (hi_moe-mz5).
+
+    Each specialist maintains its own isolated memory of execution patterns
+    and common errors. Memories are keyed by specialist name.
+    """
+    # specialist_name -> list of execution records
+    executions: dict[str, list[dict]] = field(default_factory=dict)
+    max_per_specialist: int = 5
+
+    def record_execution(
+        self,
+        specialist: str,
+        task_summary: str,
+        success: bool,
+        error: str | None = None,
+        code_snippet: str | None = None,
+    ) -> None:
+        """Record a specialist execution."""
+        if specialist not in self.executions:
+            self.executions[specialist] = []
+
+        self.executions[specialist].append({
+            "task": task_summary[:200],
+            "success": success,
+            "error": error[:150] if error else None,
+            "code_pattern": code_snippet[:100] if code_snippet else None,
+            "timestamp": datetime.now().isoformat(),
+        })
+
+        # Trim to max
+        if len(self.executions[specialist]) > self.max_per_specialist:
+            self.executions[specialist] = self.executions[specialist][-self.max_per_specialist:]
+
+    def get_memory_prompt(self, specialist: str) -> str:
+        """Generate context for a specific specialist's prompt."""
+        if specialist not in self.executions or not self.executions[specialist]:
+            return ""
+
+        history = self.executions[specialist]
+        failures = [e for e in history if not e["success"]]
+
+        lines = [f"\n\n--- Your ({specialist}) Recent History ---"]
+
+        if failures:
+            lines.append("Previous errors to avoid:")
+            for f in failures[-2:]:
+                lines.append(f"  - {f['error']}")
+
+        successes = [e for e in history if e["success"]]
+        if successes:
+            lines.append("Successful patterns:")
+            for s in successes[-2:]:
+                lines.append(f"  - {s['task'][:80]}")
+
+        return "\n".join(lines)
+
+    def get_specialist_stats(self, specialist: str) -> dict:
+        """Get success/failure counts for a specialist."""
+        if specialist not in self.executions:
+            return {"successes": 0, "failures": 0}
+        history = self.executions[specialist]
+        return {
+            "successes": sum(1 for e in history if e["success"]),
+            "failures": sum(1 for e in history if not e["success"]),
+        }
+
+
+@dataclass
 class ConversationContext:
     """Multi-turn context that persists across runs (hi_moe-ceg).
 
@@ -643,21 +762,28 @@ class RoutingDispatcher:
         trajectory_logger: "TrajectoryLogger | None" = None,
         conversation_context: ConversationContext | None = None,
         learned_router: LearnedRouter | None = None,
+        memory: DispatcherMemory | None = None,
     ):
         self.fleet = fleet
         self.llm = llm  # Optional: for structured plan generation
         self.trajectory_logger = trajectory_logger
         self.conversation_context = conversation_context  # Multi-turn context (hi_moe-ceg)
         self.learned_router = learned_router  # Optional: learned routing (hi_moe-bh3)
+        self.memory = memory or DispatcherMemory()  # Per-run memory (hi_moe-mz5)
 
     async def execute(self, task: Task) -> Outcome:
         """Route task to specialist and execute with retry logic (hi_moe-a4w)."""
         logger.info(f"[Dispatcher] Routing task: {task.task_id}")
 
+        # Inject memory context if available (hi_moe-mz5)
+        memory_context = self.memory.get_memory_prompt()
+        if memory_context:
+            logger.info(f"[Dispatcher] Injecting memory context ({len(self.memory.specialist_outcomes)} specialists tracked)")
+
         # If LLM available, use structured output for planning
         if self.llm:
             try:
-                return await self._execute_with_plan(task)
+                return await self._execute_with_plan(task, memory_context)
             except ValueError as e:
                 logger.warning(f"[Dispatcher] Structured planning failed: {e}")
                 logger.info("[Dispatcher] Falling back to heuristic routing")
@@ -674,6 +800,10 @@ class RoutingDispatcher:
                 task, exclude=tried_specialists
             )
             tried_specialists.append(specialist)
+
+            # Record routing decision to memory (hi_moe-mz5)
+            problem_type = routing_strategy  # Use strategy as problem type proxy
+            self.memory.record_routing(task.task_id, specialist, problem_type)
             logger.info(
                 f"[Dispatcher] Selected specialist: {specialist} "
                 f"(strategy: {routing_strategy}, signals: {routing_signals}, attempt {attempt + 1})"
@@ -727,12 +857,13 @@ class RoutingDispatcher:
             self._record_outcome(task, final_outcome, tried_specialists[-1])
         return final_outcome
 
-    async def _execute_with_plan(self, task: Task) -> Outcome:
+    async def _execute_with_plan(self, task: Task, memory_context: str = "") -> Outcome:
         """Execute task using LLM-generated structured plan.
 
         Implements linear sequence execution (hi_moe-d87).
         """
-        # Get structured plan from LLM
+        # Get structured plan from LLM (with memory context if available)
+        # Note: memory_context can be used to influence plan generation in future
         plan = await get_dispatcher_plan(
             self.llm,
             objective=task.objective,
@@ -780,6 +911,13 @@ class RoutingDispatcher:
             logger.info(
                 f"[Dispatcher] Step {i + 1}/{len(plan.steps)}: "
                 f"{step.description} -> {step.specialist}"
+            )
+
+            # Record routing decision to memory (hi_moe-mz5)
+            self.memory.record_routing(
+                task_id=f"{task.task_id}-step{i + 1}",
+                specialist=step.specialist,
+                problem_type=routing_strategy,
             )
 
             # Create subtask for this step
@@ -962,13 +1100,17 @@ class RoutingDispatcher:
     def _record_outcome(
         self, task: Task, outcome: Outcome, specialist: str
     ) -> None:
-        """Record outcome for future routing (hi_moe-ceg, hi_moe-bh3)."""
+        """Record outcome for future routing (hi_moe-ceg, hi_moe-bh3, hi_moe-mz5)."""
         # Extract code from outcome if available (hi_moe-qwo)
         code = None
         if isinstance(outcome.result, FleetResult):
             code = outcome.result.code
         elif outcome.result and isinstance(outcome.result, dict):
             code = outcome.result.get("code")
+
+        # Record to per-run memory (hi_moe-mz5)
+        success = outcome.status == TaskStatus.COMPLETED
+        self.memory.record_outcome(specialist, success)
 
         # Record to conversation context (hi_moe-ceg)
         if self.conversation_context:
@@ -1019,10 +1161,12 @@ class SpecializedFleet:
         llm: LLMClient,
         trajectory_logger: "TrajectoryLogger | None" = None,
         code_runner: "Callable[[str, list], dict] | None" = None,
+        memory: FleetMemory | None = None,
     ):
         self.llm = llm
         self.trajectory_logger = trajectory_logger
         self.code_runner = code_runner  # Optional code validation (hi_moe-f5d)
+        self.memory = memory or FleetMemory()  # Per-specialist memory (hi_moe-mz5)
         self._adapter_cache: dict[str, str | None] = {}
 
     async def _get_adapter_for_specialist(self, specialist: str) -> str | None:
@@ -1061,6 +1205,14 @@ class SpecializedFleet:
 
             outcome = await self._execute_once(task, specialist, error_context)
 
+            # Record execution to memory (hi_moe-mz5)
+            self.memory.record_execution(
+                specialist=specialist,
+                task_summary=task.objective[:200] if task.objective else "",
+                success=outcome.status == TaskStatus.COMPLETED,
+                error=outcome.error,
+            )
+
             if outcome.status == TaskStatus.COMPLETED:
                 if attempt > 0:
                     logger.info(f"[Fleet] Succeeded on retry {attempt}")
@@ -1088,7 +1240,10 @@ class SpecializedFleet:
         adapter_info = f" (adapter: {adapter})" if adapter else " (base model)"
         logger.info(f"[Fleet] Executing with {specialist} specialist{adapter_info}")
 
-        prompt = self._create_execution_prompt(task, specialist) + error_context
+        # Inject specialist-specific memory context (hi_moe-mz5)
+        memory_context = self.memory.get_memory_prompt(specialist)
+
+        prompt = self._create_execution_prompt(task, specialist) + error_context + memory_context
         system_prompt = self._get_system_prompt(specialist)
         start_time = time.monotonic()
 
