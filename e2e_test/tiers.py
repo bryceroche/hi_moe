@@ -1328,8 +1328,14 @@ def solution():
                 code = def_match.group(1).strip()
                 # Validate it looks like real code (has return or significant logic)
                 if "return" in code or code.count("\n") > 2:
-                    logger.info("[Fleet] Extracted code from inside <think> block")
-                    return code
+                    # Additional validation: check it's valid Python syntax (not pseudocode)
+                    try:
+                        compile(code, "<string>", "exec")
+                        logger.info("[Fleet] Extracted code from inside <think> block")
+                        return code
+                    except SyntaxError:
+                        logger.debug("[Fleet] Rejected pseudocode from <think> block (syntax error)")
+                        pass  # Continue to other strategies
 
         # Strategy 5: Response starts with <think> but no code found - fail cleanly
         if response.strip().startswith("<think>"):
