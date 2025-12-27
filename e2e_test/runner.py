@@ -211,6 +211,14 @@ class Runner:
             if isinstance(self.llm, LoggingLLMClient):
                 self.llm.set_context(task_id=run_id)
 
+        # Log run start to training DB (hi_moe-828)
+        if self.call_db:
+            self.call_db.start_run(
+                run_id=run_id,
+                problem_id=problem.get("id", "unknown"),
+                metadata={"title": problem.get("title"), "difficulty": problem.get("difficulty")},
+            )
+
         # Store problem in context
         context.set("problem", problem)
         context.set("status", RunStatus.RUNNING.value)
@@ -304,6 +312,16 @@ class Runner:
                 "validation": result.validation,
                 "error": result.error,
             })
+
+        # End run in training DB (hi_moe-828)
+        if self.call_db:
+            self.call_db.end_run(
+                run_id=run_id,
+                success=result.status == RunStatus.COMPLETED,
+                total_time_ms=int(result.elapsed_ms),
+                result_code=result.code,
+                error=result.error,
+            )
 
         # Log legacy trajectory if configured (deprecated, use trajectory_logger)
         if self.log_dir and not self.trajectory_logger:
