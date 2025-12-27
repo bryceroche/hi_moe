@@ -526,6 +526,9 @@ class AbstractArchitect:
             ]
         )
 
+        # Strip <think>...</think> blocks from plan (QwQ model reasoning)
+        plan = self._strip_think_blocks(plan)
+
         logger.info("[Architect] Plan created, delegating to Dispatcher")
 
         # Create subtask for dispatcher
@@ -589,6 +592,35 @@ class AbstractArchitect:
 
 Create a brief execution plan (2-3 steps) to solve this task.
 Focus on the algorithm approach and implementation strategy."""
+
+    def _strip_think_blocks(self, text: str) -> str:
+        """Strip <think>...</think> blocks from text, keeping content after them."""
+        if "<think>" not in text:
+            return text
+
+        # Find content after </think> if it exists
+        think_end = text.find("</think>")
+        if think_end != -1:
+            after = text[think_end + 8:].strip()  # len("</think>") = 8
+            if after:
+                return after
+
+        # Remove the <think> block entirely if unclosed or nothing after
+        think_start = text.find("<think>")
+        if think_start > 0:
+            return text[:think_start].strip()
+
+        # Entire text is in <think> block - extract any useful content
+        # Look for structured content (numbered steps, bullet points)
+        import re
+        plan_match = re.search(r"(?:^|\n)((?:\d+\.|[-*])\s+.+(?:\n(?:\d+\.|[-*])\s+.+)*)",
+                               text, re.MULTILINE)
+        if plan_match:
+            return plan_match.group(1).strip()
+
+        # Return empty if we can't extract anything useful
+        logger.warning("[Architect] Could not extract useful plan from reasoning-only output")
+        return ""
 
 
 class RoutingDispatcher:
@@ -1063,6 +1095,7 @@ class SpecializedFleet:
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.2,
+                max_tokens=8192,  # QwQ needs room for reasoning + code
                 adapter=adapter,
             )
 
@@ -1198,12 +1231,17 @@ class SpecializedFleet:
     def _get_system_prompt(self, specialist: str) -> str:
         prompts = {
             "python": "You are a Python programming expert. Write clean, efficient, working code. "
-                "IMPORTANT: Do NOT use <think> tags. Output ONLY the code wrapped in ```python``` blocks, no explanations.",
+                "Keep your reasoning brief. After thinking, ALWAYS provide the complete code solution "
+                "wrapped in ```python``` blocks. The code block is REQUIRED - never stop before writing it.",
             "math": "You are a mathematical reasoning expert. Solve problems step by step with clear calculations, then provide the final answer.",
-            "algorithms": "You are an algorithms expert specializing in competitive programming. Analyze time/space complexity and implement optimal solutions.",
-            "data_structures": "You are a data structures expert. Choose appropriate data structures and implement efficient operations.",
-            "debugging": "You are a debugging expert. Identify bugs systematically, explain the root cause, and provide the corrected code.",
-            "refactoring": "You are a code refactoring expert. Improve code quality, readability, and maintainability while preserving functionality.",
+            "algorithms": "You are an algorithms expert specializing in competitive programming. "
+                "Keep reasoning brief. After analysis, provide the optimal solution in ```python``` blocks. "
+                "The code block is REQUIRED.",
+            "data_structures": "You are a data structures expert. Choose appropriate data structures and implement efficient operations. "
+                "Provide code in ```python``` blocks after brief reasoning.",
+            "debugging": "You are a debugging expert. Identify bugs systematically, explain the root cause, and provide the corrected code in ```python``` blocks.",
+            "refactoring": "You are a code refactoring expert. Improve code quality, readability, and maintainability while preserving functionality. "
+                "Provide refactored code in ```python``` blocks.",
         }
         return prompts.get(specialist, prompts["python"])
 
@@ -1224,12 +1262,10 @@ Write a Python solution. Output only the code, wrapped in ```python``` blocks.""
         """Extract Python code from LLM response.
 
         Handles QwQ-style <think>...</think> reasoning blocks by looking for code
-        after the thinking section or within code blocks.
+        after the thinking section, inside the thinking, or within code blocks.
         """
-        # Strip <think>...</think> reasoning blocks (QwQ model output)
-        # Look for code after </think> tag first
+        # Strategy 1: Look for code after </think> tag
         if "<think>" in response:
-            # Try to find code block after </think>
             think_end = response.find("</think>")
             if think_end != -1:
                 after_think = response[think_end + 8:]  # len("</think>") = 8
@@ -1242,22 +1278,43 @@ Write a Python solution. Output only the code, wrapped in ```python``` blocks.""
                 if match:
                     return match.group(1).strip()
 
-        # Try ```python blocks in full response
+        # Strategy 2: Try ```python blocks anywhere in response (including inside <think>)
         match = re.search(r"```python\n(.*?)```", response, re.DOTALL)
         if match:
             return match.group(1).strip()
 
-        # Try generic ``` blocks
+        # Strategy 3: Try generic ``` blocks
         match = re.search(r"```\n(.*?)```", response, re.DOTALL)
         if match:
             return match.group(1).strip()
 
-        # Safety check: if response looks like reasoning (starts with <think>), return empty
+        # Strategy 4: Look for function definitions inside <think> blocks
+        # Sometimes QwQ writes code inline during reasoning
+        if "<think>" in response:
+            # Extract content inside <think> tag (may be unclosed if token limit hit)
+            think_start = response.find("<think>") + 7
+            think_end = response.find("</think>")
+            if think_end == -1:
+                think_content = response[think_start:]  # Unclosed tag
+            else:
+                think_content = response[think_start:think_end]
+
+            # Look for function definitions inside thinking
+            def_match = re.search(r"(def \w+\([^)]*\):.*?)(?=\n\n[A-Z]|\nNow|\nSo|\nOkay|$)",
+                                  think_content, re.DOTALL)
+            if def_match:
+                code = def_match.group(1).strip()
+                # Validate it looks like real code (has return or significant logic)
+                if "return" in code or code.count("\n") > 2:
+                    logger.info("[Fleet] Extracted code from inside <think> block")
+                    return code
+
+        # Strategy 5: Response starts with <think> but no code found - fail cleanly
         if response.strip().startswith("<think>"):
-            logger.warning("[Fleet] Response is raw reasoning with no code block - extraction failed")
+            logger.warning("[Fleet] Response is reasoning-only with no extractable code")
             return ""
 
-        # Only use fallback if response looks like actual code (starts with def/class/import)
+        # Strategy 6: Raw code without any blocks (starts with def/class/import)
         stripped = response.strip()
         if stripped.startswith(("def ", "class ", "import ", "from ")):
             return stripped

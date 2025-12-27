@@ -118,7 +118,7 @@ class VLLMServer:
             max_lora_rank=64,
             tensor_parallel_size=1,
             gpu_memory_utilization=0.9,
-            max_model_len=4096,
+            max_model_len=8192,  # Increased for QwQ reasoning + code output
             trust_remote_code=True,
             enforce_eager=True,  # Disable torch.compile to save memory
         )
@@ -304,7 +304,7 @@ class VLLMServer:
             "status": "healthy",
             "model": MODEL_ID,
             "adapters": list(self.lora_requests.keys()),
-            "max_model_len": 4096,
+            "max_model_len": 8192,
         }
 
     @modal.asgi_app()
@@ -355,7 +355,7 @@ class VLLMServer:
                 "status": "healthy",
                 "model": MODEL_ID,
                 "adapters": list(self.lora_requests.keys()),
-                "max_model_len": 4096,
+                "max_model_len": 8192,
             }
 
         return api
