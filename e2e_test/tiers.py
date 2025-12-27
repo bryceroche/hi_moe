@@ -517,7 +517,10 @@ class AbstractArchitect:
             [
                 {
                     "role": "system",
-                    "content": "You are a strategic planner. Break down the task into clear steps.",
+                    "content": "You are a strategic planner for coding problems. "
+                    "CRITICAL: Plan ONLY for the exact problem given. Do not confuse with other problems. "
+                    "Focus on the specific function signature and test cases provided. "
+                    "Output a brief 2-3 step plan for the algorithm approach.",
                 },
                 {"role": "user", "content": plan_prompt},
             ]
@@ -1068,6 +1071,16 @@ class SpecializedFleet:
             # Extract code from response
             code = self._extract_code(response)
 
+            # Fail if no code was extracted
+            if not code:
+                logger.error("[Fleet] No valid code extracted from response")
+                return Outcome(
+                    task_id=task.task_id,
+                    status=TaskStatus.FAILED,
+                    error="Code extraction failed - no valid Python code in response",
+                    metadata={"specialist": specialist, "adapter": adapter, "raw_response": response[:500]},
+                )
+
             # Self-healing: validate code if we have a runner and test cases (hi_moe-f5d)
             validation_result = None
             test_cases = task.context.get("test_cases") if task.context else None
@@ -1184,7 +1197,8 @@ class SpecializedFleet:
 
     def _get_system_prompt(self, specialist: str) -> str:
         prompts = {
-            "python": "You are a Python programming expert. Write clean, efficient, working code. Only output the code, no explanations.",
+            "python": "You are a Python programming expert. Write clean, efficient, working code. "
+                "IMPORTANT: Do NOT use <think> tags. Output ONLY the code wrapped in ```python``` blocks, no explanations.",
             "math": "You are a mathematical reasoning expert. Solve problems step by step with clear calculations, then provide the final answer.",
             "algorithms": "You are an algorithms expert specializing in competitive programming. Analyze time/space complexity and implement optimal solutions.",
             "data_structures": "You are a data structures expert. Choose appropriate data structures and implement efficient operations.",
@@ -1207,8 +1221,28 @@ Plan:
 Write a Python solution. Output only the code, wrapped in ```python``` blocks."""
 
     def _extract_code(self, response: str) -> str:
-        """Extract Python code from LLM response."""
-        # Try ```python blocks
+        """Extract Python code from LLM response.
+
+        Handles QwQ-style <think>...</think> reasoning blocks by looking for code
+        after the thinking section or within code blocks.
+        """
+        # Strip <think>...</think> reasoning blocks (QwQ model output)
+        # Look for code after </think> tag first
+        if "<think>" in response:
+            # Try to find code block after </think>
+            think_end = response.find("</think>")
+            if think_end != -1:
+                after_think = response[think_end + 8:]  # len("</think>") = 8
+                # Try ```python blocks in the post-think section
+                match = re.search(r"```python\n(.*?)```", after_think, re.DOTALL)
+                if match:
+                    return match.group(1).strip()
+                # Try generic ``` blocks
+                match = re.search(r"```\n(.*?)```", after_think, re.DOTALL)
+                if match:
+                    return match.group(1).strip()
+
+        # Try ```python blocks in full response
         match = re.search(r"```python\n(.*?)```", response, re.DOTALL)
         if match:
             return match.group(1).strip()
@@ -1218,8 +1252,19 @@ Write a Python solution. Output only the code, wrapped in ```python``` blocks.""
         if match:
             return match.group(1).strip()
 
-        # Fallback: assume entire response is code
-        return response.strip()
+        # Safety check: if response looks like reasoning (starts with <think>), return empty
+        if response.strip().startswith("<think>"):
+            logger.warning("[Fleet] Response is raw reasoning with no code block - extraction failed")
+            return ""
+
+        # Only use fallback if response looks like actual code (starts with def/class/import)
+        stripped = response.strip()
+        if stripped.startswith(("def ", "class ", "import ", "from ")):
+            return stripped
+
+        # No valid code found
+        logger.warning("[Fleet] Could not extract valid Python code from response")
+        return ""
 
     def _format_validation_error(self, validation: dict) -> str:
         """Format validation results into helpful error feedback for retry (hi_moe-f5d).
