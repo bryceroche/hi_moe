@@ -15,10 +15,11 @@ training_image = (
         "torch",
         "transformers",
         "peft",
-        "trl",
+        "trl==0.9.6",  # Pin to stable version with known API
         "datasets",
         "bitsandbytes",
         "accelerate",
+        "rich",  # Required by TRL
     )
 )
 
@@ -109,10 +110,11 @@ def train_lora(
         },
     )
 
-    # Format function with domain-specific specialist types
+    # Pre-format examples into "text" field for SFTTrainer
     def format_example(example):
-        specialist_type = SPECIALIST_TYPES.get(example.get("domain", ""), "programming")
-        return f"""<|im_start|>system
+        domain = example.get("domain", "")
+        specialist_type = SPECIALIST_TYPES.get(domain, "programming")
+        text = f"""<|im_start|>system
 You are a {specialist_type} specialist. Solve the problem step by step, then provide working code.
 <|im_end|>
 <|im_start|>user
@@ -125,6 +127,11 @@ You are a {specialist_type} specialist. Solve the problem step by step, then pro
 {example['solution']}
 ```
 <|im_end|>"""
+        return {"text": text}
+
+    # Apply formatting to create "text" column
+    dataset = dataset.map(format_example)
+    print(f"Formatted dataset: {dataset}")
 
     # Training args
     output_dir = f"{ADAPTERS_PATH}/{adapter_name}"
@@ -148,13 +155,13 @@ You are a {specialist_type} specialist. Solve the problem step by step, then pro
         load_best_model_at_end=True,
     )
 
-    # Train
+    # Train with pre-formatted "text" field
     trainer = SFTTrainer(
         model=model,
         args=training_args,
         train_dataset=dataset["train"],
         eval_dataset=dataset["eval"],
-        formatting_func=format_example,
+        dataset_text_field="text",
         max_seq_length=4096,
         tokenizer=tokenizer,
     )
