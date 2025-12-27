@@ -22,6 +22,23 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Retry configuration per tier (hi_moe-a4w)
+@dataclass
+class RetryConfig:
+    """Configuration for tier-level retries."""
+    max_retries: int = 2
+    include_error_context: bool = True
+    escalate_on_failure: bool = True
+
+
+TIER_RETRY_CONFIG = {
+    "fleet": RetryConfig(max_retries=2, include_error_context=True, escalate_on_failure=True),
+    "dispatcher": RetryConfig(max_retries=1, include_error_context=True, escalate_on_failure=True),
+    "architect": RetryConfig(max_retries=1, include_error_context=True, escalate_on_failure=True),
+    "monitor": RetryConfig(max_retries=1, include_error_context=True, escalate_on_failure=False),
+}
+
+
 class TaskStatus(Enum):
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
@@ -179,40 +196,69 @@ def solution():
 
 
 class ProgressMonitor:
-    """Tier 4: Tracks progress and detects issues."""
+    """Tier 4: Tracks progress and detects issues with top-level retry (hi_moe-a4w)."""
 
     def __init__(self, architect: "AbstractArchitect"):
         self.architect = architect
         self.task_history: list[Outcome] = []
 
     async def execute(self, task: Task) -> Outcome:
-        """Execute task with progress monitoring."""
+        """Execute task with progress monitoring and retry logic (hi_moe-a4w)."""
+        config = TIER_RETRY_CONFIG["monitor"]
+        errors: list[str] = []
+
         logger.info(f"[ProgressMonitor] Starting task: {task.task_id}")
         start_time = datetime.now()
 
-        try:
-            # Delegate to Architect
-            outcome = await self.architect.execute(task)
+        for attempt in range(config.max_retries + 1):
+            try:
+                # Delegate to Architect
+                outcome = await self.architect.execute(task)
 
-            # Track outcome
-            self.task_history.append(outcome)
+                # Track outcome
+                self.task_history.append(outcome)
 
-            # Calculate execution time
-            elapsed = (datetime.now() - start_time).total_seconds() * 1000
-            outcome.execution_time_ms = elapsed
+                # Calculate execution time
+                elapsed = (datetime.now() - start_time).total_seconds() * 1000
+                outcome.execution_time_ms = elapsed
 
-            logger.info(
-                f"[ProgressMonitor] Task {task.task_id} completed: {outcome.status.value}"
-            )
-            return outcome
+                if outcome.status == TaskStatus.COMPLETED:
+                    if attempt > 0:
+                        logger.info(f"[ProgressMonitor] Succeeded on retry {attempt}")
+                    logger.info(
+                        f"[ProgressMonitor] Task {task.task_id} completed: {outcome.status.value}"
+                    )
+                    return outcome
 
-        except Exception as e:
-            logger.error(f"[ProgressMonitor] Task {task.task_id} failed: {e}")
-            return Outcome(
-                task_id=task.task_id,
-                status=TaskStatus.FAILED,
-                error=str(e),
-            )
+                # Failed but not exception - record error
+                errors.append(outcome.error or "Unknown error")
+                logger.warning(
+                    f"[ProgressMonitor] Attempt {attempt + 1}/{config.max_retries + 1} failed: {outcome.error}"
+                )
+
+            except Exception as e:
+                errors.append(str(e))
+                logger.error(f"[ProgressMonitor] Task {task.task_id} exception: {e}")
+
+        # All retries exhausted - log everything and give up
+        elapsed = (datetime.now() - start_time).total_seconds() * 1000
+        logger.error(
+            f"[ProgressMonitor] Task {task.task_id} failed after {config.max_retries + 1} attempts. "
+            f"Total time: {elapsed:.0f}ms. Errors: {errors}"
+        )
+
+        final_outcome = Outcome(
+            task_id=task.task_id,
+            status=TaskStatus.FAILED,
+            error=f"All attempts exhausted. Errors: {errors}",
+            execution_time_ms=elapsed,
+            metadata={
+                "total_attempts": config.max_retries + 1,
+                "errors": errors,
+            },
+        )
+        self.task_history.append(final_outcome)
+        return final_outcome
 
 
 class AbstractArchitect:
@@ -229,11 +275,42 @@ class AbstractArchitect:
         self.trajectory_logger = trajectory_logger
 
     async def execute(self, task: Task) -> Outcome:
-        """Create execution plan and delegate to Dispatcher."""
+        """Create execution plan and delegate to Dispatcher with retry (hi_moe-a4w)."""
+        config = TIER_RETRY_CONFIG["architect"]
+        errors: list[str] = []
+
+        for attempt in range(config.max_retries + 1):
+            # Generate plan (with error context for retries)
+            error_context = ""
+            if attempt > 0 and errors and config.include_error_context:
+                error_context = f"\n\nPrevious attempt failed: {errors[-1]}\nPlease revise the plan to address this issue."
+
+            outcome = await self._execute_once(task, error_context)
+
+            if outcome.status == TaskStatus.COMPLETED:
+                if attempt > 0:
+                    logger.info(f"[Architect] Succeeded on retry {attempt}")
+                return outcome
+
+            # Record error for next retry
+            errors.append(outcome.error or "Unknown error")
+            logger.warning(f"[Architect] Attempt {attempt + 1}/{config.max_retries + 1} failed: {outcome.error}")
+
+        # All retries exhausted
+        logger.error(f"[Architect] All {config.max_retries + 1} attempts failed")
+        return Outcome(
+            task_id=task.task_id,
+            status=TaskStatus.FAILED,
+            error=f"Architect failed after {config.max_retries + 1} attempts. Errors: {errors}",
+            metadata={"retry_errors": errors},
+        )
+
+    async def _execute_once(self, task: Task, error_context: str = "") -> Outcome:
+        """Single execution attempt with planning."""
         logger.info(f"[Architect] Planning task: {task.task_id}")
 
         # Generate plan using LLM
-        plan_prompt = self._create_plan_prompt(task)
+        plan_prompt = self._create_plan_prompt(task) + error_context
         plan = await self.llm.generate(
             [
                 {
@@ -318,7 +395,7 @@ class RoutingDispatcher:
         self.trajectory_logger = trajectory_logger
 
     async def execute(self, task: Task) -> Outcome:
-        """Route task to specialist and execute."""
+        """Route task to specialist and execute with retry logic (hi_moe-a4w)."""
         logger.info(f"[Dispatcher] Routing task: {task.task_id}")
 
         # If LLM available, use structured output for planning
@@ -330,32 +407,55 @@ class RoutingDispatcher:
                 logger.info("[Dispatcher] Falling back to heuristic routing")
                 # Fall through to heuristic routing
 
-        # Fallback: heuristic-based routing (original behavior)
-        specialist = self._select_specialist(task)
-        logger.info(f"[Dispatcher] Selected specialist: {specialist}")
+        # Heuristic-based routing with retry logic
+        config = TIER_RETRY_CONFIG["dispatcher"]
+        tried_specialists: list[str] = []
+        errors: list[str] = []
 
-        # Log heuristic routing decision (hi_moe-r8q)
-        if self.trajectory_logger:
-            from .trajectory_logger import DispatcherRecord
-            dispatcher_record = DispatcherRecord(
-                ts=datetime.utcnow().isoformat(),
-                task_id=task.task_id,
-                task_objective=task.objective,
-                routing_decision="heuristic",
-                specialist=specialist,
-                rationale=f"Heuristic keyword match selected {specialist}",
-                context_summary=str(task.context)[:200] if task.context else None,
-            )
+        for attempt in range(config.max_retries + 1):
+            # Select specialist (try different one on retry)
+            specialist = self._select_specialist(task, exclude=tried_specialists)
+            tried_specialists.append(specialist)
+            logger.info(f"[Dispatcher] Selected specialist: {specialist} (attempt {attempt + 1})")
 
-        outcome = await self.fleet.execute(task, specialist)
+            # Log heuristic routing decision (hi_moe-r8q)
+            if self.trajectory_logger:
+                from .trajectory_logger import DispatcherRecord
+                dispatcher_record = DispatcherRecord(
+                    ts=datetime.utcnow().isoformat(),
+                    task_id=task.task_id,
+                    task_objective=task.objective,
+                    routing_decision="heuristic",
+                    specialist=specialist,
+                    rationale=f"Heuristic keyword match selected {specialist} (attempt {attempt + 1})",
+                    context_summary=str(task.context)[:200] if task.context else None,
+                )
 
-        # Update and log dispatcher record (hi_moe-r8q)
-        if self.trajectory_logger:
-            dispatcher_record.outcome_status = outcome.status.value
-            dispatcher_record.outcome_error = outcome.error
-            self.trajectory_logger.log_dispatcher(dispatcher_record)
+            outcome = await self.fleet.execute(task, specialist)
 
-        return outcome
+            # Update and log dispatcher record (hi_moe-r8q)
+            if self.trajectory_logger:
+                dispatcher_record.outcome_status = outcome.status.value
+                dispatcher_record.outcome_error = outcome.error
+                self.trajectory_logger.log_dispatcher(dispatcher_record)
+
+            if outcome.status == TaskStatus.COMPLETED:
+                if attempt > 0:
+                    logger.info(f"[Dispatcher] Succeeded with {specialist} on retry {attempt}")
+                return outcome
+
+            # Record error for next retry
+            errors.append(f"{specialist}: {outcome.error}")
+            logger.warning(f"[Dispatcher] Attempt {attempt + 1} with {specialist} failed: {outcome.error}")
+
+        # All retries exhausted
+        logger.error(f"[Dispatcher] All {config.max_retries + 1} attempts failed")
+        return Outcome(
+            task_id=task.task_id,
+            status=TaskStatus.FAILED,
+            error=f"Failed after trying specialists: {tried_specialists}. Errors: {errors}",
+            metadata={"tried_specialists": tried_specialists, "errors": errors},
+        )
 
     async def _execute_with_plan(self, task: Task) -> Outcome:
         """Execute task using LLM-generated structured plan.
@@ -460,18 +560,40 @@ class RoutingDispatcher:
 
         return final_outcome
 
-    def _select_specialist(self, task: Task) -> str:
-        """Select specialist based on task content (heuristic fallback)."""
+    def _select_specialist(self, task: Task, exclude: list[str] | None = None) -> str:
+        """Select specialist based on task content (heuristic fallback).
+
+        Args:
+            task: Task to route
+            exclude: List of specialists to exclude (already tried)
+        """
+        exclude = exclude or []
         objective_lower = task.objective.lower()
 
-        if any(
-            kw in objective_lower for kw in ["python", "code", "implement", "function"]
-        ):
-            return "python"
-        if any(kw in objective_lower for kw in ["math", "algorithm", "proof"]):
-            return "math"
+        # Priority order of specialists to try
+        candidates = []
 
-        return "python"  # Default
+        if any(kw in objective_lower for kw in ["python", "code", "implement", "function"]):
+            candidates.append("python")
+        if any(kw in objective_lower for kw in ["math", "algorithm", "proof"]):
+            candidates.append("math")
+        if any(kw in objective_lower for kw in ["debug", "fix", "error", "bug"]):
+            candidates.append("debugging")
+        if any(kw in objective_lower for kw in ["refactor", "clean", "improve"]):
+            candidates.append("refactoring")
+
+        # Add all valid specialists as fallbacks
+        for specialist in VALID_SPECIALISTS:
+            if specialist not in candidates:
+                candidates.append(specialist)
+
+        # Return first non-excluded specialist
+        for specialist in candidates:
+            if specialist not in exclude:
+                return specialist
+
+        # All excluded, return general (shouldn't happen with proper config)
+        return "general"
 
 
 class SpecializedFleet:
@@ -523,13 +645,46 @@ class SpecializedFleet:
         return None
 
     async def execute(self, task: Task, specialist: str) -> Outcome:
-        """Execute task with specified specialist."""
+        """Execute task with specified specialist, with retry logic (hi_moe-a4w)."""
+        config = TIER_RETRY_CONFIG["fleet"]
+        errors: list[str] = []
+
+        for attempt in range(config.max_retries + 1):
+            # Build error context for retries
+            error_context = ""
+            if attempt > 0 and errors and config.include_error_context:
+                error_context = f"\n\nPrevious attempt failed with: {errors[-1]}\nPlease fix the issue and try again."
+
+            outcome = await self._execute_once(task, specialist, error_context)
+
+            if outcome.status == TaskStatus.COMPLETED:
+                if attempt > 0:
+                    logger.info(f"[Fleet] Succeeded on retry {attempt}")
+                return outcome
+
+            # Record error for next retry
+            errors.append(outcome.error or "Unknown error")
+            logger.warning(f"[Fleet] Attempt {attempt + 1}/{config.max_retries + 1} failed: {outcome.error}")
+
+        # All retries exhausted
+        logger.error(f"[Fleet] All {config.max_retries + 1} attempts failed")
+        return Outcome(
+            task_id=task.task_id,
+            status=TaskStatus.FAILED,
+            error=f"Failed after {config.max_retries + 1} attempts. Errors: {errors}",
+            metadata={"specialist": specialist, "retry_errors": errors},
+        )
+
+    async def _execute_once(
+        self, task: Task, specialist: str, error_context: str = ""
+    ) -> Outcome:
+        """Single execution attempt with specified specialist."""
         # Find matching adapter for this specialist
         adapter = await self._get_adapter_for_specialist(specialist)
         adapter_info = f" (adapter: {adapter})" if adapter else " (base model)"
         logger.info(f"[Fleet] Executing with {specialist} specialist{adapter_info}")
 
-        prompt = self._create_execution_prompt(task, specialist)
+        prompt = self._create_execution_prompt(task, specialist) + error_context
         system_prompt = self._get_system_prompt(specialist)
         start_time = time.monotonic()
 
