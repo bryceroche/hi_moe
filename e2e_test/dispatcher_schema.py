@@ -81,25 +81,15 @@ class DispatcherPlan:
         return cls(steps=steps)
 
 
-# Prompt template for structured output
-DISPATCHER_SYSTEM_PROMPT = """You are a task dispatcher that breaks down programming tasks into executable steps.
+# Prompt template for structured output (hi_moe-eet: optimized for token efficiency)
+# Original: 640 chars -> Optimized: 280 chars (~56% reduction)
+DISPATCHER_SYSTEM_PROMPT = """Task dispatcher. Output JSON only:
+{"steps": [{"description": "action", "specialist": "python|math|general"}]}
+Specialists: python=code, math=analysis, general=other. 1-3 steps max. No markdown."""
 
-CRITICAL: You must respond with ONLY valid JSON in exactly this format:
-{"steps": [{"description": "what to do", "specialist": "python|math|general"}]}
-
-Rules:
-- Output ONLY the JSON object, no other text
-- Each step must have "description" (what to accomplish) and "specialist" (who executes)
-- Valid specialists: "python" (code implementation), "math" (algorithmic analysis), "general" (other tasks)
-- Keep steps focused and atomic (1 step = 1 action)
-- For most coding tasks, 1-3 steps is sufficient
-- DO NOT include markdown code blocks, just raw JSON"""
-
-DISPATCHER_USER_PROMPT = """Break down this task into steps:
-
-Task: {objective}
+DISPATCHER_USER_PROMPT = """Task: {objective}
 {context_section}
-Respond with JSON only: {{"steps": [{{"description": "...", "specialist": "python|math|general"}}]}}"""
+JSON: {{"steps": [...]}}"""
 
 
 def extract_json_from_response(response: str) -> dict:

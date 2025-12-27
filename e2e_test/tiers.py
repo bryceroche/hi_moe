@@ -738,14 +738,12 @@ class AbstractArchitect:
         if memory_context:
             logger.info(f"[Architect] Injecting memory of {len(self.memory.failed_plans)} failed approaches")
 
+        # Optimized prompt (hi_moe-eet): condensed from 256 to ~80 chars
         plan = await self.llm.generate(
             [
                 {
                     "role": "system",
-                    "content": "You are a strategic planner for coding problems. "
-                    "CRITICAL: Plan ONLY for the exact problem given. Do not confuse with other problems. "
-                    "Focus on the specific function signature and test cases provided. "
-                    "Output a brief 2-3 step plan for the algorithm approach.",
+                    "content": "Planner. Output 2-3 step algorithm plan for the EXACT problem given.",
                 },
                 {"role": "user", "content": plan_prompt},
             ]
@@ -1557,26 +1555,19 @@ class SpecializedFleet:
             )
 
     def _get_system_prompt(self, specialist: str) -> str:
-        # Common suffix for all specialists to enforce output format
-        format_instruction = (
-            "\n\nIMPORTANT FORMAT RULES:"
-            "\n- Do NOT use <think> tags. Skip internal reasoning."
-            "\n- Output a brief analysis (2-3 sentences max), then the code."
-            "\n- Code MUST be in ```python``` blocks."
-            "\n- Never output reasoning without code."
-        )
-
+        # Optimized prompts (hi_moe-eet): ~60% token reduction
+        # - /no_think directive handles thinking suppression at API level
+        # - Format example in user prompt is sufficient for output structure
+        # Original: ~250 chars -> Optimized: ~60 chars per specialist
         prompts = {
-            "python": "You are a Python programming expert. Write clean, efficient, working code.",
-            "math": "You are a mathematical reasoning expert. Solve problems step by step with clear calculations, then provide the final answer.",
-            "algorithms": "You are an algorithms expert specializing in competitive programming. "
-                "Analyze the problem, identify the optimal approach, then provide the solution.",
-            "data_structures": "You are a data structures expert. Choose appropriate data structures and implement efficient operations.",
-            "debugging": "You are a debugging expert. Identify bugs systematically, explain the root cause, and provide the corrected code.",
-            "refactoring": "You are a code refactoring expert. Improve code quality, readability, and maintainability while preserving functionality.",
+            "python": "Python expert. Write working code in ```python``` blocks.",
+            "math": "Math expert. Show key steps, then code in ```python``` blocks.",
+            "algorithms": "Algorithms expert. Optimal solution in ```python``` blocks.",
+            "data_structures": "Data structures expert. Efficient code in ```python``` blocks.",
+            "debugging": "Debugging expert. Fix bugs, code in ```python``` blocks.",
+            "refactoring": "Refactoring expert. Improved code in ```python``` blocks.",
         }
-        base = prompts.get(specialist, prompts["python"])
-        return base + format_instruction
+        return prompts.get(specialist, prompts["python"])
 
     def _create_execution_prompt(self, task: Task, specialist: str) -> str:
         context = task.context
@@ -1592,21 +1583,15 @@ class SpecializedFleet:
         elif function_name:
             func_requirement = f"\n\nFunction must be named: {function_name}"
 
+        # Optimized prompt (hi_moe-eet): removed verbose format example
+        # /no_think handles thinking suppression, system prompt specifies code blocks
         return f"""Problem:
 {original}
 
 Plan:
 {plan}{func_requirement}
 
-Write a Python solution. Brief analysis (2-3 sentences), then code in ```python``` blocks.
-Do NOT use <think> tags. Output format example:
-
-The approach uses X algorithm with O(n) complexity.
-
-```python
-def solution():
-    # implementation
-```"""
+Solution (code in ```python``` blocks):"""
 
     def _extract_code(self, response: str) -> str:
         """Extract Python code from LLM response.
