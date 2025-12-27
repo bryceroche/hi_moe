@@ -130,6 +130,7 @@ class Runner:
         log_dir: Path | str | None = None,
         code_runner: Callable[[str, list], dict] | None = None,
         enable_trajectory_logging: bool = True,
+        enable_fast_path: bool = True,
     ):
         """Initialize the Runner.
 
@@ -139,11 +140,13 @@ class Runner:
             log_dir: Directory for trajectory logs (None = default ./runs)
             code_runner: Optional code execution function
             enable_trajectory_logging: Enable detailed vLLM call logging (hi_moe-iz9)
+            enable_fast_path: Enable tier-skip for simple problems (hi_moe-00z)
         """
         self.retry_config = retry_config or RetryConfig()
         self.log_dir = Path(log_dir) if log_dir else Path("./runs")
         self.code_runner = code_runner
         self.enable_trajectory_logging = enable_trajectory_logging
+        self.enable_fast_path = enable_fast_path
 
         # Set up trajectory logging if enabled
         self.trajectory_logger: TrajectoryLogger | None = None
@@ -292,9 +295,22 @@ class Runner:
         problem: dict,
         context: TaskContext,
     ) -> Outcome | None:
-        """Execute problem with tiered retry logic."""
+        """Execute problem with tiered retry logic and optional fast path (hi_moe-00z)."""
         retries_used = {"top_level": 0, "architect": 0}
         context.set("retries_used", retries_used)
+
+        # Fast path: try direct Fleet call for simple problems
+        if self.enable_fast_path and self._is_simple_problem(problem):
+            logger.info("[Runner] Simple problem detected, trying fast path")
+            outcome = await self._execute_fast_path(problem, context)
+
+            if outcome.status == TaskStatus.COMPLETED:
+                logger.info("[Runner] Fast path succeeded")
+                return outcome
+
+            # Fast path failed, fall back to full tier stack
+            logger.info("[Runner] Fast path failed, falling back to full tier stack")
+            context.set("fast_path_failed", True)
 
         last_outcome = None
         last_error = None
@@ -393,6 +409,85 @@ class Runner:
             constraints=constraints,
         )
 
+    def _is_simple_problem(self, problem: dict) -> bool:
+        """Classify problem as simple (fast path) vs complex (full tier stack).
+
+        Simple problems (hi_moe-00z):
+        - Have function_name and function_signature defined
+        - Statement is under 1000 chars
+        - No explicit multi-step indicators
+
+        Returns:
+            True if problem should use fast path (direct Fleet call)
+        """
+        # Must have function metadata
+        if not problem.get("function_name") or not problem.get("function_signature"):
+            return False
+
+        statement = problem.get("statement", "")
+
+        # Very long statements may need planning
+        if len(statement) > 1000:
+            return False
+
+        # Multi-step indicators suggest full planning
+        multi_step_indicators = [
+            "step 1",
+            "step 2",
+            "first,",
+            "second,",
+            "then,",
+            "finally,",
+            "multiple",
+            "several",
+            "phase",
+        ]
+        statement_lower = statement.lower()
+        for indicator in multi_step_indicators:
+            if indicator in statement_lower:
+                return False
+
+        return True
+
+    async def _execute_fast_path(
+        self,
+        problem: dict,
+        context: TaskContext,
+    ) -> Outcome:
+        """Execute problem via direct Fleet call, skipping Architect/Dispatcher.
+
+        This is the fast path for simple coding problems (hi_moe-00z).
+        Saves ~3 LLM calls and ~150s latency.
+        """
+        logger.info(f"[Runner] Fast path: skipping Architect/Dispatcher for simple problem")
+
+        # Create task for Fleet
+        task = self._create_task(problem, context, attempt=0)
+
+        # Execute directly via Fleet with python specialist
+        try:
+            outcome = await self.fleet.execute(task, specialist="python")
+
+            self._log_tier_call("fleet_fast", task, outcome)
+
+            context.set("last_outcome", {
+                "status": outcome.status.value,
+                "result": outcome.result,
+                "error": outcome.error,
+            })
+            context.set("fast_path", True)
+
+            return outcome
+
+        except Exception as e:
+            logger.error(f"[Runner] Fast path failed: {e}")
+            # Return failed outcome (will trigger fallback to full tier stack)
+            return Outcome(
+                task_id=task.task_id,
+                status=TaskStatus.FAILED,
+                error=f"Fast path failed: {e}",
+            )
+
     def _log_tier_call(self, tier: str, task: Task, outcome: Outcome) -> None:
         """Log a tier call for trajectory tracking."""
         entry = {
@@ -452,6 +547,7 @@ async def create_runner(
     mock: bool = False,
     log_dir: str | None = None,
     enable_trajectory_logging: bool = True,
+    enable_fast_path: bool = True,
 ) -> Runner:
     """Factory function to create a Runner with appropriate LLM client.
 
@@ -460,6 +556,7 @@ async def create_runner(
         mock: Use mock LLM for testing
         log_dir: Directory for trajectory logs
         enable_trajectory_logging: Enable detailed vLLM call logging (hi_moe-iz9)
+        enable_fast_path: Enable tier-skip for simple problems (hi_moe-00z)
 
     Returns:
         Configured Runner instance
@@ -475,4 +572,5 @@ async def create_runner(
         llm=llm,
         log_dir=log_dir,
         enable_trajectory_logging=enable_trajectory_logging,
+        enable_fast_path=enable_fast_path,
     )
