@@ -543,6 +543,65 @@ class CallDB:
                 (decision_correct, actual_specialist_needed, run_id),
             )
 
+    def get_specialist_success_rate(self, specialist: str) -> dict:
+        """Get historical success rate for a specialist (hi_moe-fsb).
+
+        Returns:
+            {"success_rate": float, "total": int, "successes": int}
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    COUNT(*) as total,
+                    SUM(CASE WHEN decision_correct THEN 1 ELSE 0 END) as successes
+                FROM routing_decisions
+                WHERE selected_specialist = ? AND decision_correct IS NOT NULL
+                """,
+                (specialist,),
+            ).fetchone()
+
+        total = row["total"] or 0
+        successes = row["successes"] or 0
+        rate = successes / total if total > 0 else 0.5  # Default to 50% if no history
+
+        return {
+            "success_rate": rate,
+            "total": total,
+            "successes": successes,
+        }
+
+    def get_all_specialist_rates(self) -> dict[str, dict]:
+        """Get success rates for all specialists (hi_moe-fsb).
+
+        Returns:
+            {"python": {"success_rate": 0.8, "total": 10, ...}, ...}
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    selected_specialist,
+                    COUNT(*) as total,
+                    SUM(CASE WHEN decision_correct THEN 1 ELSE 0 END) as successes
+                FROM routing_decisions
+                WHERE decision_correct IS NOT NULL
+                GROUP BY selected_specialist
+                """,
+            ).fetchall()
+
+        rates = {}
+        for row in rows:
+            spec = row["selected_specialist"]
+            total = row["total"] or 0
+            successes = row["successes"] or 0
+            rates[spec] = {
+                "success_rate": successes / total if total > 0 else 0.5,
+                "total": total,
+                "successes": successes,
+            }
+        return rates
+
     # -------------------------------------------------------------------------
     # Training data export
     # -------------------------------------------------------------------------

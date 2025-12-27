@@ -888,6 +888,39 @@ class RoutingDispatcher:
         self.learned_router = learned_router  # Optional: learned routing (hi_moe-bh3)
         self.memory = memory or DispatcherMemory()  # Per-run memory (hi_moe-mz5)
         self.call_db = call_db  # Optional: for routing decision logging (hi_moe-ehx)
+        self._specialist_rates_cache: dict | None = None  # Cache for session (hi_moe-fsb)
+
+    def _get_adaptive_confidence(self, specialist: str, base_confidence: float) -> float:
+        """Calculate adaptive confidence based on historical success rates (hi_moe-fsb).
+
+        Blends base confidence with historical data, weighted by sample size.
+        """
+        if not self.call_db:
+            return base_confidence
+
+        # Cache rates for the session to avoid repeated DB queries
+        if self._specialist_rates_cache is None:
+            self._specialist_rates_cache = self.call_db.get_all_specialist_rates()
+
+        if specialist not in self._specialist_rates_cache:
+            return base_confidence
+
+        history = self._specialist_rates_cache[specialist]
+        historical_rate = history["success_rate"]
+        sample_size = history["total"]
+
+        # Blend: more weight to history as sample size grows
+        # At 10 samples, 50/50 blend. At 50+ samples, 80% history.
+        history_weight = min(0.8, sample_size / 20)
+        base_weight = 1 - history_weight
+
+        adaptive = (base_confidence * base_weight) + (historical_rate * history_weight)
+        logger.debug(
+            f"[Dispatcher] Adaptive confidence for {specialist}: "
+            f"{base_confidence:.2f} base + {historical_rate:.2f} history "
+            f"({sample_size} samples) = {adaptive:.2f}"
+        )
+        return adaptive
 
     async def execute(self, task: Task) -> Outcome:
         """Route task to specialist and execute with retry logic (hi_moe-a4w)."""
@@ -934,11 +967,14 @@ class RoutingDispatcher:
                 # Extract keywords from routing signals
                 keywords = [s.split(":")[-1] for s in routing_signals if ":" in s]
                 alternatives = [s for s in tried_specialists if s != specialist]
+                # Calculate adaptive confidence from historical data (hi_moe-fsb)
+                base_conf = 0.7 if attempt == 0 else 0.5
+                adaptive_conf = self._get_adaptive_confidence(specialist, base_conf)
                 self.call_db.log_routing_decision(
                     run_id=run_id,
                     problem_id=problem_id or task.task_id,
                     selected_specialist=specialist,
-                    confidence=0.7 if attempt == 0 else 0.5,  # Lower confidence on retries
+                    confidence=adaptive_conf,
                     problem_keywords=keywords,
                     alternative_specialists=alternatives,
                 )
@@ -1059,11 +1095,13 @@ class RoutingDispatcher:
             # First specialist in the plan is the primary routing decision
             primary_specialist = plan.steps[0].specialist if plan.steps else "python"
             all_specialists = list({s.specialist for s in plan.steps})
+            # Calculate adaptive confidence from historical data (hi_moe-fsb)
+            adaptive_conf = self._get_adaptive_confidence(primary_specialist, 0.8)
             self.call_db.log_routing_decision(
                 run_id=run_id,
                 problem_id=problem_id or task.task_id,
                 selected_specialist=primary_specialist,
-                confidence=0.8,  # Higher confidence for LLM-planned routes
+                confidence=adaptive_conf,
                 problem_keywords=routing_signals,
                 alternative_specialists=[s for s in all_specialists if s != primary_specialist],
             )
