@@ -35,6 +35,7 @@ from .tiers import (
     Outcome,
     ProgressMonitor,
     RoutingDispatcher,
+    RoutingMode,
     SpecializedFleet,
     Task,
     TaskStatus,
@@ -138,6 +139,7 @@ class Runner:
         enable_training_db: bool = True,
         enable_memory_persistence: bool = True,
         enable_embedding_routing: bool = False,
+        routing_mode: str | RoutingMode = "winner_take_all",
     ):
         """Initialize the Runner.
 
@@ -151,7 +153,15 @@ class Runner:
             enable_training_db: Enable SQLite training data logging (hi_moe-828)
             enable_embedding_routing: Enable semantic embedding routing (hi_moe-awf)
             enable_memory_persistence: Enable persistent agent memory (hi_moe-ycg)
+            routing_mode: Routing mode for specialist selection (hi_moe-zrn):
+                - "winner_take_all": Always pick highest-scoring specialist (default)
+                - "probabilistic": Sample proportionally to similarity scores
+                - "blended": Return blend weights for LoRA composition
         """
+        # Parse routing mode if string
+        if isinstance(routing_mode, str):
+            routing_mode = RoutingMode(routing_mode)
+        self.routing_mode = routing_mode
         self.retry_config = retry_config or RetryConfig()
         self.log_dir = Path(log_dir) if log_dir else Path("./runs")
         self.code_runner = code_runner
@@ -211,7 +221,10 @@ class Runner:
             call_db=self.call_db,  # Wire call_db for routing decision logging (hi_moe-ehx)
             memory=self.dispatcher_memory,
             embedding_router=self.embedding_router,  # Wire embedding router (hi_moe-awf)
+            routing_mode=self.routing_mode,  # Wire routing mode (hi_moe-zrn)
         )
+        if self.routing_mode != RoutingMode.WINNER_TAKE_ALL:
+            logger.info(f"[Runner] Weighted routing enabled: {self.routing_mode.value} (hi_moe-zrn)")
         self.architect = AbstractArchitect(self.dispatcher, self.llm, trajectory_logger=self.trajectory_logger)
         self.monitor = ProgressMonitor(self.architect)
 

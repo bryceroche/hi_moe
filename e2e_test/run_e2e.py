@@ -195,6 +195,13 @@ async def main():
         action="store_true",
         help="Enable semantic embedding routing (hi_moe-awf)",
     )
+    parser.add_argument(
+        "--routing-mode",
+        type=str,
+        choices=["winner_take_all", "probabilistic", "blended"],
+        default="winner_take_all",
+        help="Routing mode for specialist selection (hi_moe-zrn)",
+    )
     args = parser.parse_args()
 
     # Create function-call validator wrapper for test problems (hi_moe-ld8)
@@ -243,6 +250,7 @@ async def main():
         code_runner=code_runner,
         enable_trajectory_logging=True,
         enable_embedding_routing=args.embedding_routing,
+        routing_mode=args.routing_mode,  # Routing mode (hi_moe-zrn)
     )
 
     logger.info("Runner initialized with tiers: ProgressMonitor -> Architect -> Dispatcher -> Fleet -> CodeRunner")

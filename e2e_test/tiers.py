@@ -908,6 +908,23 @@ class RoutingDispatcher:
         self._specialist_rates_cache: dict | None = None  # Cache for session (hi_moe-fsb)
         self._last_blend_weights: dict[str, float] | None = None  # Cache blend weights for LoRA blending (hi_moe-zrn)
 
+    def get_blend_weights(self) -> dict[str, float] | None:
+        """Get the last computed blend weights for LoRA composition (hi_moe-zrn).
+
+        Returns:
+            Dict mapping specialist names to blend weights (0-1, sum to 1.0),
+            or None if no weights available.
+
+        Example:
+            {"python": 0.70, "math": 0.30}
+
+        These weights can be used for:
+        - LoRA weight blending: merged = 0.7*python_lora + 0.3*math_lora
+        - Prompt blending: mix system prompts proportionally
+        - Analysis: understand cross-domain task requirements
+        """
+        return self._last_blend_weights
+
     def _get_adaptive_confidence(self, specialist: str, base_confidence: float) -> float:
         """Calculate adaptive confidence based on historical success rates (hi_moe-fsb).
 
@@ -1242,20 +1259,55 @@ class RoutingDispatcher:
         """
         exclude = exclude or []
 
-        # Try embedding router first (hi_moe-awf)
+        # Try embedding router first (hi_moe-awf, hi_moe-zrn)
         if self.embedding_router:
             try:
-                specialist, scores, reasoning = self.embedding_router.predict(
-                    task.objective, task.context, exclude
-                )
-                if specialist is not None:
-                    routing_signals = [f"embedding:{reasoning}"]
-                    for name, score in scores.items():
-                        routing_signals.append(f"sim:{name}={score:.2f}")
-                    logger.info(f"[Dispatcher] Embedding routing: {specialist} ({reasoning})")
-                    return specialist, "embedding", routing_signals
+                # Use routing mode to determine selection strategy (hi_moe-zrn)
+                if self.routing_mode == RoutingMode.PROBABILISTIC:
+                    # Probabilistic selection based on similarity weights
+                    specialist, weights, reasoning = self.embedding_router.select_probabilistic(
+                        task.objective, task.context, exclude
+                    )
+                    self._last_blend_weights = weights
+                    routing_signals = [f"probabilistic:{reasoning}"]
+                    for name, weight in weights.items():
+                        routing_signals.append(f"weight:{name}={weight:.0%}")
+                    logger.info(f"[Dispatcher] Probabilistic routing: {specialist} ({reasoning})")
+                    return specialist, "probabilistic", routing_signals
+
+                elif self.routing_mode == RoutingMode.BLENDED:
+                    # Get blend weights (for future LoRA composition)
+                    weights, reasoning = self.embedding_router.predict_weighted(
+                        task.objective, task.context, exclude
+                    )
+                    self._last_blend_weights = weights
+                    # For now, still pick the top specialist but store weights
+                    specialist = max(weights, key=lambda k: weights[k]) if weights else None
+                    if specialist:
+                        routing_signals = [f"blended:{reasoning}"]
+                        for name, weight in weights.items():
+                            routing_signals.append(f"blend:{name}={weight:.0%}")
+                        logger.info(f"[Dispatcher] Blended routing: {specialist} ({reasoning})")
+                        return specialist, "blended", routing_signals
+
                 else:
-                    logger.info(f"[Dispatcher] Embedding router deferred: {reasoning}")
+                    # Winner-take-all (default)
+                    specialist, scores, reasoning = self.embedding_router.predict(
+                        task.objective, task.context, exclude
+                    )
+                    if specialist is not None:
+                        # Also compute blend weights for logging
+                        weights, _ = self.embedding_router.predict_weighted(
+                            task.objective, task.context, exclude
+                        )
+                        self._last_blend_weights = weights
+                        routing_signals = [f"embedding:{reasoning}"]
+                        for name, score in scores.items():
+                            routing_signals.append(f"sim:{name}={score:.2f}")
+                        logger.info(f"[Dispatcher] Embedding routing: {specialist} ({reasoning})")
+                        return specialist, "embedding", routing_signals
+                    else:
+                        logger.info(f"[Dispatcher] Embedding router deferred: {reasoning}")
             except Exception as e:
                 logger.warning(f"[Dispatcher] Embedding router error: {e}")
 
