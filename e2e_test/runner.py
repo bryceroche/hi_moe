@@ -35,6 +35,7 @@ from .tiers import (
     Task,
     TaskStatus,
 )
+from .outcome_schema import FleetResult
 from .trajectory_logger import (
     TrajectoryLogger,
     LoggingLLMClient,
@@ -154,7 +155,12 @@ class Runner:
             self.llm = llm
 
         # Initialize tiers with (potentially wrapped) LLM and trajectory logger (hi_moe-r8q)
-        self.fleet = SpecializedFleet(self.llm, trajectory_logger=self.trajectory_logger)
+        # Wire CodeRunner to Fleet for self-healing (hi_moe-ld8)
+        self.fleet = SpecializedFleet(
+            self.llm,
+            trajectory_logger=self.trajectory_logger,
+            code_runner=self.code_runner,
+        )
         self.dispatcher = RoutingDispatcher(self.fleet, self.llm, trajectory_logger=self.trajectory_logger)
         self.architect = AbstractArchitect(self.dispatcher, self.llm, trajectory_logger=self.trajectory_logger)
         self.monitor = ProgressMonitor(self.architect)
@@ -199,10 +205,14 @@ class Runner:
 
             elapsed_ms = (time.monotonic() - start_time) * 1000
 
-            # Extract code from outcome
+            # Extract code from outcome (hi_moe-ld8, hi_moe-qwo)
+            # Handle both FleetResult objects and legacy dict results
             code = None
             if outcome and outcome.result:
-                code = outcome.result.get("code")
+                if isinstance(outcome.result, FleetResult):
+                    code = outcome.result.code
+                elif isinstance(outcome.result, dict):
+                    code = outcome.result.get("code")
 
             # Run code validation if we have a code runner and code
             validation = None
@@ -344,12 +354,14 @@ class Runner:
         """Create a Task from problem definition."""
         task_id = f"{context.run_id}-attempt{attempt}"
 
-        # Build context with retry information
+        # Build context with retry information (hi_moe-ld8)
+        # Include test_cases for Fleet self-healing validation
         task_context = {
             "function_name": problem.get("function_name"),
             "function_signature": problem.get("function_signature"),
             "run_id": context.run_id,
             "attempt": attempt,
+            "test_cases": problem.get("test_cases"),  # For Fleet self-healing
         }
 
         # Add previous failure info for retries
