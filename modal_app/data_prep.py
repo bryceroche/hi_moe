@@ -170,50 +170,64 @@ def prepare_code_contests_dataset(max_samples: int = 200) -> dict:
     """Download and format CodeContests for algorithm training.
 
     CodeContests contains competitive programming problems with solutions.
+    Language codes: 1=C++, 2=C++, 3=Python3, 4=Python, 5=Java, etc.
     """
     import json
     import os
     from datasets import load_dataset
 
     print("Downloading CodeContests dataset...")
-    # Use the valid split which has solutions
-    dataset = load_dataset("deepmind/code_contests", split="valid")
+    # Use the train split which has more data
+    dataset = load_dataset("deepmind/code_contests", split="train")
 
     os.makedirs(DATA_PATH, exist_ok=True)
 
     train_data = []
     eval_data = []
+    sample_count = 0
 
-    for i, example in enumerate(dataset):
-        if i >= max_samples:
+    # Language codes for Python
+    PYTHON_LANGS = {3, 4}  # Python3 and Python
+
+    for example in dataset:
+        if sample_count >= max_samples:
             break
 
         # Get problem description
         problem = example["description"]
+        if not problem or len(problem) < 50:
+            continue
 
-        # Get Python solutions if available
-        python_solutions = example.get("solutions", {}).get("python3", [])
-        if not python_solutions:
-            python_solutions = example.get("solutions", {}).get("python", [])
+        # Get solutions - structure is {language: [int], solution: [str]}
+        solutions = example.get("solutions", {})
+        languages = solutions.get("language", [])
+        codes = solutions.get("solution", [])
 
-        if not python_solutions:
+        # Find Python solutions
+        python_solution = None
+        for lang, code in zip(languages, codes):
+            if lang in PYTHON_LANGS and code and len(code) > 20:
+                python_solution = code
+                break
+
+        if not python_solution:
             continue  # Skip if no Python solution
-
-        solution = python_solutions[0]  # Take first solution
 
         # Format for training
         entry = {
             "domain": "algorithms",
             "problem": problem[:2000],  # Truncate long problems
             "reasoning": f"This is a competitive programming problem. Let me analyze the requirements and implement an efficient solution.",
-            "solution": solution,
+            "solution": python_solution,
         }
 
         # 90/10 train/eval split
-        if i % 10 == 0:
+        if sample_count % 10 == 0:
             eval_data.append(entry)
         else:
             train_data.append(entry)
+
+        sample_count += 1
 
     # Write files
     train_file = f"{DATA_PATH}/algorithms_train.jsonl"
