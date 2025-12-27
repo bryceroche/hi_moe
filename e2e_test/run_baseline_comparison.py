@@ -158,7 +158,7 @@ Return ONLY the Python code in a ```python block. No explanation."""
 
     try:
         # Single direct call with base model (no adapter)
-        response = await llm.generate(messages, temperature=0.3, max_tokens=4096, adapter=None)
+        response = await llm.generate(messages, temperature=0.3, max_tokens=2048, adapter=None)
         llm_calls = 1
 
         # Extract code
