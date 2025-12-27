@@ -1720,43 +1720,46 @@ class SpecializedFleet:
             )
 
     def _get_system_prompt(self, specialist: str) -> str:
-        # Optimized prompts (hi_moe-eet): ~60% token reduction
-        # - /no_think directive handles thinking suppression at API level
-        # - Format example in user prompt is sufficient for output structure
-        # Original: ~250 chars -> Optimized: ~60 chars per specialist
+        # Optimized prompts (hi_moe-9wj): Aligned with baseline for clarity
+        # Key changes: explicit "Return ONLY", mention function, action-oriented
         prompts = {
-            "python": "Python expert. Write working code in ```python``` blocks.",
-            "math": "Math expert. Show key steps, then code in ```python``` blocks.",
-            "algorithms": "Algorithms expert. Optimal solution in ```python``` blocks.",
-            "data_structures": "Data structures expert. Efficient code in ```python``` blocks.",
-            "debugging": "Debugging expert. Fix bugs, code in ```python``` blocks.",
-            "refactoring": "Refactoring expert. Improved code in ```python``` blocks.",
+            "python": "Write a Python function to solve the problem. Return ONLY code in ```python``` block.",
+            "math": "Solve using mathematical analysis. Return ONLY Python code in ```python``` block.",
+            "algorithms": "Design optimal algorithm. Return ONLY Python code in ```python``` block.",
+            "data_structures": "Use efficient data structures. Return ONLY Python code in ```python``` block.",
+            "debugging": "Debug and fix the code. Return ONLY corrected code in ```python``` block.",
+            "refactoring": "Refactor the code. Return ONLY improved code in ```python``` block.",
         }
         return prompts.get(specialist, prompts["python"])
 
     def _create_execution_prompt(self, task: Task, specialist: str) -> str:
+        """Build execution prompt aligned with baseline format (hi_moe-9wj)."""
         context = task.context
         plan = context.get("plan", "")
         original = context.get("original_task", task.objective)
         function_name = context.get("function_name", "")
         function_signature = context.get("function_signature", "")
 
-        # Build function requirement section if available (hi_moe-66w)
-        func_requirement = ""
+        # Build requirements section like baseline (hi_moe-9wj)
+        requirements = []
+        if function_name:
+            requirements.append(f"- Function name: {function_name}")
         if function_signature:
-            func_requirement = f"\n\nRequired function signature: {function_signature}"
-        elif function_name:
-            func_requirement = f"\n\nFunction must be named: {function_name}"
+            requirements.append(f"- Signature: {function_signature}")
 
-        # Optimized prompt (hi_moe-eet): removed verbose format example
-        # /no_think handles thinking suppression, system prompt specifies code blocks
+        requirements_section = ""
+        if requirements:
+            requirements_section = "\n\nRequirements:\n" + "\n".join(requirements)
+
+        # Aligned with baseline: clear structure, explicit output instruction
         return f"""Problem:
 {original}
+{requirements_section}
 
 Plan:
-{plan}{func_requirement}
+{plan}
 
-Solution (code in ```python``` blocks):"""
+Return ONLY the Python code in a ```python``` block. No explanation."""
 
     def _extract_code(self, response: str) -> str:
         """Extract Python code from LLM response (hi_moe-rmq).
