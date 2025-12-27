@@ -905,6 +905,7 @@ class RoutingDispatcher:
         self.memory = memory or DispatcherMemory()  # Per-run memory (hi_moe-mz5)
         self.call_db = call_db  # Optional: for routing decision logging (hi_moe-ehx)
         self.routing_mode = routing_mode  # Routing mode: winner_take_all, probabilistic, blended (hi_moe-zrn)
+        self.enable_adaptive_confidence = True  # Toggle for A/B testing (hi_moe-c5m)
         self._specialist_rates_cache: dict | None = None  # Cache for session (hi_moe-fsb)
         self._last_blend_weights: dict[str, float] | None = None  # Cache blend weights for LoRA blending (hi_moe-zrn)
 
@@ -929,7 +930,12 @@ class RoutingDispatcher:
         """Calculate adaptive confidence based on historical success rates (hi_moe-fsb).
 
         Blends base confidence with historical data, weighted by sample size.
+        Can be disabled via enable_adaptive_confidence for A/B testing (hi_moe-c5m).
         """
+        if not self.enable_adaptive_confidence:
+            logger.debug(f"[Dispatcher] Adaptive confidence disabled (hi_moe-c5m), using base: {base_confidence}")
+            return base_confidence
+
         if not self.call_db:
             return base_confidence
 

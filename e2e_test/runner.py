@@ -140,6 +140,7 @@ class Runner:
         enable_memory_persistence: bool = True,
         enable_embedding_routing: bool = False,
         routing_mode: str | RoutingMode = "winner_take_all",
+        enable_adapters: bool = True,  # Disable for A/B testing (hi_moe-e1v)
     ):
         """Initialize the Runner.
 
@@ -157,6 +158,7 @@ class Runner:
                 - "winner_take_all": Always pick highest-scoring specialist (default)
                 - "probabilistic": Sample proportionally to similarity scores
                 - "blended": Return blend weights for LoRA composition
+            enable_adapters: Enable LoRA adapters in Fleet (hi_moe-e1v)
         """
         # Parse routing mode if string
         if isinstance(routing_mode, str):
@@ -204,6 +206,7 @@ class Runner:
             trajectory_logger=self.trajectory_logger,
             code_runner=self.code_runner,
             memory=self.fleet_memory,
+            enable_adapters=enable_adapters,  # Toggle adapters for A/B testing (hi_moe-e1v)
         )
         # Initialize embedding router if enabled (hi_moe-awf)
         self.embedding_router = None

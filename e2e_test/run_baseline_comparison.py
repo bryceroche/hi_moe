@@ -306,6 +306,11 @@ async def main():
         default=None,
         help="Output JSON file for results",
     )
+    parser.add_argument(
+        "--no-adapters",
+        action="store_true",
+        help="Disable LoRA adapters in hierarchy (for A/B testing, hi_moe-e1v)",
+    )
     args = parser.parse_args()
 
     # Setup LLM
@@ -320,10 +325,14 @@ async def main():
         llm = LLMClient(args.endpoint)
 
     # Create hierarchy runner
+    enable_adapters = not args.no_adapters
+    if not enable_adapters:
+        logger.info("Adapters DISABLED for this run (hi_moe-e1v experiment)")
     runner = Runner(
         llm=llm,
         log_dir="./runs/comparison",
         enable_trajectory_logging=True,
+        enable_adapters=enable_adapters,  # Toggle adapters for A/B testing (hi_moe-e1v)
     )
 
     summary = ComparisonSummary()
