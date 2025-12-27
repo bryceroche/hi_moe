@@ -36,7 +36,7 @@ SPECIALIST_TYPES = {
 
 
 @app.function(
-    gpu="A100-80GB",  # Need 80GB for QwQ-32B training
+    gpu="A100-80GB",  # Need 80GB for Qwen3-32B training
     image=training_image,
     volumes={
         DATA_PATH: data_volume,
@@ -76,8 +76,9 @@ def train_lora(
         bnb_4bit_use_double_quant=True,
     )
 
-    # Load model
-    model_id = "Qwen/QwQ-32B-Preview"
+    # Load model - must match vllm_server.py base model for LoRA compatibility
+    # Using Qwen3-32B (same architecture as Qwen3-32B-AWQ used in inference)
+    model_id = "Qwen/Qwen3-32B"
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
 
