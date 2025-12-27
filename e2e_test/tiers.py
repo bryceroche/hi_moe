@@ -1529,10 +1529,11 @@ class SpecializedFleet:
         errors: list[str] = []
 
         for attempt in range(config.max_retries + 1):
-            # Build error context for retries
+            # Build error context for retries (hi_moe-3ci: enhanced self-correction feedback)
             error_context = ""
             if attempt > 0 and errors and config.include_error_context:
-                error_context = f"\n\nPrevious attempt failed with: {errors[-1]}\nPlease fix the issue and try again."
+                # The error already contains structured feedback from _format_validation_error
+                error_context = f"\n\n## Self-Correction (Attempt {attempt + 1})\n\n{errors[-1]}"
 
             outcome = await self._execute_once(task, specialist, error_context)
 
@@ -1617,8 +1618,8 @@ class SpecializedFleet:
                     )
 
                     if not validation_result.get("passed", False):
-                        # Build detailed error feedback for retry
-                        error_feedback = self._format_validation_error(validation_result)
+                        # Build detailed error feedback for retry (hi_moe-3ci: include failed code)
+                        error_feedback = self._format_validation_error(validation_result, failed_code=code)
                         logger.warning(f"[Fleet] Code validation failed: {error_feedback[:200]}...")
 
                         # Log failed validation attempt (hi_moe-r8q)
@@ -1889,38 +1890,59 @@ Solution (code in ```python``` blocks):"""
         logger.warning("[Fleet] Could not extract valid Python code from response")
         return ""
 
-    def _format_validation_error(self, validation: dict) -> str:
-        """Format validation results into helpful error feedback for retry (hi_moe-f5d).
+    def _format_validation_error(self, validation: dict, failed_code: str | None = None) -> str:
+        """Format validation results into helpful error feedback for retry (hi_moe-f5d, hi_moe-3ci).
 
         Creates detailed feedback about which tests failed and why, so the
-        specialist can fix the code on retry.
+        specialist can fix the code on retry. Enhanced with test inputs and
+        failed code for self-correction.
         """
-        lines = ["Code validation failed:"]
+        lines = ["## Code Validation Failed"]
 
         # Summary
         passed = validation.get("total_passed", 0)
         failed = validation.get("total_failed", 0)
-        lines.append(f"  Passed: {passed}/{passed + failed} tests")
+        lines.append(f"\nPassed: {passed}/{passed + failed} tests")
 
-        # Individual test failures
+        # Include failed code so model can see what to fix (hi_moe-3ci)
+        if failed_code:
+            lines.append("\n### Your Previous Code:")
+            lines.append("```python")
+            lines.append(failed_code[:1500])  # Limit to avoid token waste
+            lines.append("```")
+
+        # Individual test failures with inputs
+        lines.append("\n### Failed Tests:")
         test_results = validation.get("test_results", [])
+        shown_failures = 0
         for result in test_results:
             status = result.get("status", "unknown")
-            if status != "passed":
+            if status != "passed" and shown_failures < 3:  # Limit to 3 failures to save tokens
+                shown_failures += 1
                 test_id = result.get("test_id", "unknown")
-                lines.append(f"\n  Test {test_id}: {status.upper()}")
+                lines.append(f"\n**Test {test_id}: {status.upper()}**")
+
+                # Show test input (hi_moe-3ci)
+                test_input = result.get("input")
+                if test_input:
+                    input_str = str(test_input)[:150]
+                    lines.append(f"  Input: {input_str}")
 
                 # Show expected vs actual for wrong answers
                 if status == "wrong_answer":
                     expected = result.get("expected_output", "")
                     actual = result.get("actual_output", "")
-                    lines.append(f"    Expected: {expected[:100]}")
-                    lines.append(f"    Got:      {actual[:100]}")
+                    lines.append(f"  Expected: {str(expected)[:100]}")
+                    lines.append(f"  Got:      {str(actual)[:100]}")
 
                 # Show error message for runtime errors
                 error_msg = result.get("error_message")
                 if error_msg:
-                    lines.append(f"    Error: {error_msg[:200]}")
+                    lines.append(f"  Error: {error_msg[:200]}")
 
-        lines.append("\nPlease fix the code and try again.")
+        if shown_failures < failed:
+            lines.append(f"\n... and {failed - shown_failures} more failures")
+
+        lines.append("\n### Instructions:")
+        lines.append("Analyze the failing tests above and fix your code. Output only the corrected Python code.")
         return "\n".join(lines)
