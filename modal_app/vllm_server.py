@@ -81,7 +81,8 @@ vllm_image = (
         LOGS_PATH: logs_volume,
     },
     timeout=3600,  # 1 hour max request time
-    scaledown_window=300,  # Keep warm for 5 min
+    scaledown_window=900,  # Keep warm for 15 min (increased from 5 min for hi_moe-9mb)
+    min_containers=1,  # Keep 1 container always warm (hi_moe-9mb)
 )
 @modal.concurrent(max_inputs=100)
 class VLLMServer:

@@ -110,22 +110,50 @@ async def run_e2e_test(
     return result
 
 
-async def health_check(endpoint: str) -> bool:
-    """Check if Modal endpoint is healthy."""
-    import httpx
+async def health_check(endpoint: str, warmup: bool = True) -> bool:
+    """Check if Modal endpoint is healthy, optionally warming up cold containers.
 
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(f"{endpoint}/health", timeout=10)
-            if resp.status_code == 200:
-                logger.info(f"✅ Endpoint healthy: {endpoint}")
-                return True
+    Args:
+        endpoint: Modal vLLM endpoint URL
+        warmup: If True, retry with exponential backoff to allow cold start (hi_moe-9mb)
+    """
+    import httpx
+    import time
+
+    max_attempts = 12 if warmup else 1  # 12 attempts x 10s = 2 min warmup budget
+    base_timeout = 30.0 if warmup else 10.0
+
+    for attempt in range(max_attempts):
+        try:
+            async with httpx.AsyncClient() as client:
+                start = time.monotonic()
+                resp = await client.get(f"{endpoint}/health", timeout=base_timeout)
+                elapsed = time.monotonic() - start
+
+                if resp.status_code == 200:
+                    if attempt > 0:
+                        logger.info(f"✅ Endpoint warmed up after {attempt + 1} attempts ({elapsed:.1f}s)")
+                    else:
+                        logger.info(f"✅ Endpoint healthy ({elapsed:.1f}s)")
+                    return True
+                else:
+                    logger.warning(f"Endpoint returned {resp.status_code}, attempt {attempt + 1}/{max_attempts}")
+        except httpx.TimeoutException:
+            if warmup and attempt < max_attempts - 1:
+                logger.info(f"⏳ Waiting for container warmup (attempt {attempt + 1}/{max_attempts})...")
+                await asyncio.sleep(10)  # Wait before retry
             else:
-                logger.error(f"❌ Endpoint returned {resp.status_code}")
+                logger.error(f"❌ Endpoint timeout after {max_attempts} attempts")
                 return False
-    except Exception as e:
-        logger.error(f"❌ Endpoint unreachable: {e}")
-        return False
+        except Exception as e:
+            if warmup and attempt < max_attempts - 1:
+                logger.info(f"⏳ Container starting (attempt {attempt + 1}/{max_attempts}): {e}")
+                await asyncio.sleep(10)
+            else:
+                logger.error(f"❌ Endpoint unreachable: {e}")
+                return False
+
+    return False
 
 
 async def main():
@@ -157,6 +185,11 @@ async def main():
         default="./runs",
         help="Directory for trajectory logs",
     )
+    parser.add_argument(
+        "--no-warmup",
+        action="store_true",
+        help="Skip warmup retries (use when container is already warm)",
+    )
     args = parser.parse_args()
 
     # Create function-call validator wrapper for test problems (hi_moe-ld8)
@@ -187,8 +220,9 @@ async def main():
         logger.info("Using mock LLM (no Modal required)")
         llm = MockLLMClient()
     else:
-        # Health check
-        healthy = await health_check(args.endpoint)
+        # Health check with warmup (hi_moe-9mb)
+        warmup = not args.no_warmup
+        healthy = await health_check(args.endpoint, warmup=warmup)
         if not healthy:
             logger.error(
                 "Endpoint health check failed. Deploy with: modal deploy modal_app/vllm_server.py"
