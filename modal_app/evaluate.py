@@ -16,6 +16,7 @@ eval_image = (
 
 @app.function(
     image=eval_image,
+    volumes={DATA_PATH: data_volume},
     timeout=1800,
 )
 def evaluate_adapter(
