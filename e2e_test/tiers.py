@@ -1387,11 +1387,7 @@ class SpecializedFleet:
 
     async def _get_adapter_for_specialist(self, specialist: str) -> str | None:
         """Find best matching adapter for a specialist type."""
-        # Disable adapters until we have Qwen3-compatible LoRA weights (hi_moe-4os)
-        # The QwQ-trained adapters are incompatible with Qwen3-32B
-        logger.info(f"[Fleet] Adapters disabled (Qwen3 migration), using base model for '{specialist}'")
-        return None
-
+        # Adapters re-enabled after training with Qwen3-32B (hi_moe-7l1)
         if specialist in self._adapter_cache:
             return self._adapter_cache[specialist]
 
