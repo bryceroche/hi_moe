@@ -8,15 +8,22 @@ Key metrics:
 - Monthly burn rate
 - Break-even analysis for hardware purchase
 - Hidden costs of ownership
+
+Real-time tracking (hi_moe-3og):
+- Track costs as they happen during inference
+- Session-level cost accumulation
+- Callback support for cost alerts
 """
 from __future__ import annotations
 
 import json
 import logging
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -371,6 +378,192 @@ class CloudEconomics:
             logger.info(f"[CloudEconomics] Loaded {len(self.usage_records)} records")
         except Exception as e:
             logger.warning(f"[CloudEconomics] Failed to load: {e}")
+
+
+# =============================================================================
+# Real-time Cost Tracking (hi_moe-3og)
+# =============================================================================
+
+@dataclass
+class CostSession:
+    """Tracks costs for a single inference session in real-time."""
+    session_id: str
+    gpu_type: str
+    start_time: float = field(default_factory=time.monotonic)
+    end_time: float | None = None
+    task_type: str = "inference"
+    task_count: int = 0
+
+    @property
+    def duration_hours(self) -> float:
+        """Get duration in hours."""
+        end = self.end_time or time.monotonic()
+        return (end - self.start_time) / 3600
+
+    @property
+    def current_cost(self) -> float:
+        """Get current accumulated cost."""
+        pricing = CLOUD_PRICING.get(self.gpu_type, {"hourly": 4.50})
+        return self.duration_hours * pricing["hourly"]
+
+    def close(self) -> None:
+        """Mark session as complete."""
+        self.end_time = time.monotonic()
+
+
+class RealTimeCostTracker:
+    """Real-time cost tracking during inference (hi_moe-3og).
+
+    Usage:
+        tracker = RealTimeCostTracker(economics)
+
+        # Context manager for automatic tracking
+        with tracker.track("a100_80gb", "inference") as session:
+            # Do inference work
+            result = await model.generate(...)
+            session.task_count += 1
+
+        # Manual tracking
+        session = tracker.start_session("a100_80gb")
+        # ... do work ...
+        tracker.end_session(session.session_id)
+
+        # Get real-time stats
+        print(f"Session cost: ${tracker.get_session_cost():.4f}")
+        print(f"Total today: ${tracker.get_daily_cost():.2f}")
+    """
+
+    def __init__(
+        self,
+        economics: CloudEconomics | None = None,
+        cost_alert_threshold: float = 1.0,
+        on_cost_alert: Callable[[float, str], None] | None = None,
+    ):
+        """
+        Args:
+            economics: CloudEconomics instance for persisting records
+            cost_alert_threshold: Alert when session cost exceeds this ($)
+            on_cost_alert: Callback when cost threshold exceeded
+        """
+        self.economics = economics
+        self.cost_alert_threshold = cost_alert_threshold
+        self.on_cost_alert = on_cost_alert
+
+        self._active_sessions: dict[str, CostSession] = {}
+        self._completed_sessions: list[CostSession] = []
+        self._daily_cost: float = 0.0
+        self._last_reset: datetime = datetime.now()
+
+    def start_session(
+        self,
+        gpu_type: str = "a100_80gb",
+        task_type: str = "inference",
+    ) -> CostSession:
+        """Start a new cost tracking session."""
+        import uuid
+        session_id = str(uuid.uuid4())[:8]
+
+        session = CostSession(
+            session_id=session_id,
+            gpu_type=gpu_type,
+            task_type=task_type,
+        )
+        self._active_sessions[session_id] = session
+
+        logger.debug(f"[CostTracker] Started session {session_id} on {gpu_type}")
+        return session
+
+    def end_session(self, session_id: str) -> CostSession | None:
+        """End a tracking session and record the cost."""
+        session = self._active_sessions.pop(session_id, None)
+        if not session:
+            logger.warning(f"[CostTracker] Session {session_id} not found")
+            return None
+
+        session.close()
+        self._completed_sessions.append(session)
+        self._daily_cost += session.current_cost
+
+        # Record to economics if available
+        if self.economics:
+            self.economics.record_usage(
+                gpu_type=session.gpu_type,
+                duration_hours=session.duration_hours,
+                task_type=session.task_type,
+                task_count=session.task_count,
+            )
+
+        logger.info(
+            f"[CostTracker] Session {session_id} ended: "
+            f"{session.duration_hours * 3600:.1f}s, ${session.current_cost:.4f}"
+        )
+        return session
+
+    @contextmanager
+    def track(self, gpu_type: str = "a100_80gb", task_type: str = "inference"):
+        """Context manager for automatic session tracking."""
+        session = self.start_session(gpu_type, task_type)
+        try:
+            yield session
+        finally:
+            self.end_session(session.session_id)
+
+            # Check cost alert
+            if session.current_cost > self.cost_alert_threshold:
+                msg = f"Session cost ${session.current_cost:.2f} exceeded threshold ${self.cost_alert_threshold:.2f}"
+                logger.warning(f"[CostTracker] {msg}")
+                if self.on_cost_alert:
+                    self.on_cost_alert(session.current_cost, msg)
+
+    def get_active_cost(self) -> float:
+        """Get total cost of all active sessions."""
+        return sum(s.current_cost for s in self._active_sessions.values())
+
+    def get_daily_cost(self) -> float:
+        """Get total cost for today."""
+        # Reset if new day
+        if datetime.now().date() > self._last_reset.date():
+            self._daily_cost = 0.0
+            self._last_reset = datetime.now()
+            self._completed_sessions.clear()
+
+        return self._daily_cost + self.get_active_cost()
+
+    def get_session_stats(self) -> dict:
+        """Get statistics about sessions."""
+        all_sessions = self._completed_sessions + list(self._active_sessions.values())
+        if not all_sessions:
+            return {"sessions": 0, "total_cost": 0.0, "avg_cost": 0.0}
+
+        total_cost = sum(s.current_cost for s in all_sessions)
+        total_tasks = sum(s.task_count for s in all_sessions)
+
+        return {
+            "sessions": len(all_sessions),
+            "active": len(self._active_sessions),
+            "completed": len(self._completed_sessions),
+            "total_cost": total_cost,
+            "avg_cost_per_session": total_cost / len(all_sessions),
+            "total_tasks": total_tasks,
+            "cost_per_task": total_cost / total_tasks if total_tasks > 0 else 0,
+        }
+
+    def get_report(self) -> str:
+        """Get real-time cost report."""
+        stats = self.get_session_stats()
+        lines = [
+            "=" * 40,
+            "REAL-TIME COST TRACKER",
+            "=" * 40,
+            f"Active sessions: {stats['active']}",
+            f"Completed sessions: {stats['completed']}",
+            f"Current active cost: ${self.get_active_cost():.4f}",
+            f"Daily cost: ${self.get_daily_cost():.2f}",
+            f"Total tasks: {stats['total_tasks']}",
+            f"Cost per task: ${stats['cost_per_task']:.4f}",
+            "=" * 40,
+        ]
+        return "\n".join(lines)
 
 
 if __name__ == "__main__":

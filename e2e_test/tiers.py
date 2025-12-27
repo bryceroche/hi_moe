@@ -1229,21 +1229,26 @@ class SpecializedFleet:
             )
 
     def _get_system_prompt(self, specialist: str) -> str:
+        # Common suffix for all specialists to enforce output format
+        format_instruction = (
+            "\n\nIMPORTANT FORMAT RULES:"
+            "\n- Do NOT use <think> tags. Skip internal reasoning."
+            "\n- Output a brief analysis (2-3 sentences max), then the code."
+            "\n- Code MUST be in ```python``` blocks."
+            "\n- Never output reasoning without code."
+        )
+
         prompts = {
-            "python": "You are a Python programming expert. Write clean, efficient, working code. "
-                "Keep your reasoning brief. After thinking, ALWAYS provide the complete code solution "
-                "wrapped in ```python``` blocks. The code block is REQUIRED - never stop before writing it.",
+            "python": "You are a Python programming expert. Write clean, efficient, working code.",
             "math": "You are a mathematical reasoning expert. Solve problems step by step with clear calculations, then provide the final answer.",
             "algorithms": "You are an algorithms expert specializing in competitive programming. "
-                "Keep reasoning brief. After analysis, provide the optimal solution in ```python``` blocks. "
-                "The code block is REQUIRED.",
-            "data_structures": "You are a data structures expert. Choose appropriate data structures and implement efficient operations. "
-                "Provide code in ```python``` blocks after brief reasoning.",
-            "debugging": "You are a debugging expert. Identify bugs systematically, explain the root cause, and provide the corrected code in ```python``` blocks.",
-            "refactoring": "You are a code refactoring expert. Improve code quality, readability, and maintainability while preserving functionality. "
-                "Provide refactored code in ```python``` blocks.",
+                "Analyze the problem, identify the optimal approach, then provide the solution.",
+            "data_structures": "You are a data structures expert. Choose appropriate data structures and implement efficient operations.",
+            "debugging": "You are a debugging expert. Identify bugs systematically, explain the root cause, and provide the corrected code.",
+            "refactoring": "You are a code refactoring expert. Improve code quality, readability, and maintainability while preserving functionality.",
         }
-        return prompts.get(specialist, prompts["python"])
+        base = prompts.get(specialist, prompts["python"])
+        return base + format_instruction
 
     def _create_execution_prompt(self, task: Task, specialist: str) -> str:
         context = task.context
@@ -1256,7 +1261,15 @@ class SpecializedFleet:
 Plan:
 {plan}
 
-Write a Python solution. Output only the code, wrapped in ```python``` blocks."""
+Write a Python solution. Brief analysis (2-3 sentences), then code in ```python``` blocks.
+Do NOT use <think> tags. Output format example:
+
+The approach uses X algorithm with O(n) complexity.
+
+```python
+def solution():
+    # implementation
+```"""
 
     def _extract_code(self, response: str) -> str:
         """Extract Python code from LLM response.
