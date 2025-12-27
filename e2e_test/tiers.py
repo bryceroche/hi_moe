@@ -1095,7 +1095,7 @@ class SpecializedFleet:
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.2,
-                max_tokens=8192,  # QwQ needs room for reasoning + code
+                max_tokens=4096,  # Server limit; model must fit reasoning + code
                 adapter=adapter,
             )
 
