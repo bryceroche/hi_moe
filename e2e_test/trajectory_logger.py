@@ -316,6 +316,9 @@ class LoggingLLMClient:
         self.logger = trajectory_logger
         self.default_tier = default_tier
 
+        # Track the last call ID for linking validations/retries (hi_moe-35o)
+        self._last_call_id: str | None = None
+
         # Context for current call (set by caller)
         self._current_task_id: str | None = None
         self._current_tier: str | None = None
@@ -353,6 +356,15 @@ class LoggingLLMClient:
         self._current_specialist = None
         self._current_lora = None
 
+    @property
+    def last_call_id(self) -> str | None:
+        """Get the ID of the most recent generate() call (hi_moe-35o).
+
+        Returns:
+            The call_id from the last generate() call, or None if no calls made.
+        """
+        return self._last_call_id
+
     async def get_available_adapters(self) -> list[str]:
         """Get available adapters from underlying client."""
         if hasattr(self.client, "get_available_adapters"):
@@ -378,6 +390,7 @@ class LoggingLLMClient:
             Generated text
         """
         call_id = f"call-{uuid.uuid4().hex[:8]}"
+        self._last_call_id = call_id  # Store for retrieval (hi_moe-35o)
         start_time = time.monotonic()
         ts = datetime.now(timezone.utc).isoformat()
 

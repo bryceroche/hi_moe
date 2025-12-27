@@ -376,6 +376,10 @@ class Runner:
                 # Log the call
                 self._log_tier_call("monitor", task, outcome)
 
+                # Capture last_call_id from LoggingLLMClient (hi_moe-35o)
+                if hasattr(self.llm, "last_call_id") and self.llm.last_call_id:
+                    context.set("last_call_id", self.llm.last_call_id)
+
                 # Update context with outcome
                 context.set("last_outcome", {
                     "status": outcome.status.value,
@@ -383,7 +387,7 @@ class Runner:
                     "error": outcome.error,
                 })
 
-                current_call_id = context.get("last_call_id", 0)
+                current_call_id = context.get("last_call_id")
 
                 if outcome.status == TaskStatus.COMPLETED:
                     # Log successful retry for self-healing training (hi_moe-828)
@@ -529,6 +533,10 @@ class Runner:
             outcome = await self.fleet.execute(task, specialist="python")
 
             self._log_tier_call("fleet_fast", task, outcome)
+
+            # Capture last_call_id from LoggingLLMClient (hi_moe-35o)
+            if hasattr(self.llm, "last_call_id") and self.llm.last_call_id:
+                context.set("last_call_id", self.llm.last_call_id)
 
             context.set("last_outcome", {
                 "status": outcome.status.value,
