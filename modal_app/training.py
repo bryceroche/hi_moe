@@ -180,7 +180,7 @@ def main(
     adapter_name: str = "python-lora",
     train_file: str = "python_train.jsonl",
     eval_file: str = "python_eval.jsonl",
-    rank: int = 32,
+    rank: int = 16,  # Match function default for memory safety
     epochs: int = 3,
 ):
     """Local entrypoint to trigger training."""
