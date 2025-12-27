@@ -1758,71 +1758,132 @@ Plan:
 Solution (code in ```python``` blocks):"""
 
     def _extract_code(self, response: str) -> str:
-        """Extract Python code from LLM response.
+        """Extract Python code from LLM response (hi_moe-rmq).
 
-        Handles QwQ-style <think>...</think> reasoning blocks by looking for code
-        after the thinking section, inside the thinking, or within code blocks.
+        Handles multiple code block formats and QwQ-style <think>...</think> reasoning.
+        Uses a multi-strategy approach with validation to pick the best code.
         """
-        # Strategy 1: Look for code after </think> tag
+        # Helper to validate code syntax
+        def is_valid_python(code: str) -> bool:
+            if not code or not code.strip():
+                return False
+            try:
+                compile(code, "<string>", "exec")
+                return True
+            except SyntaxError:
+                return False
+
+        # Helper to extract all code blocks from text
+        def find_all_code_blocks(text: str) -> list[str]:
+            blocks = []
+            # Pattern for ```python, ```py, or just ``` blocks
+            # Handles optional whitespace before/after language specifier
+            # Also handles markdown attributes like ```python title="solution.py"
+            patterns = [
+                r"```python[^\n]*\n(.*?)```",  # ```python (with optional attrs)
+                r"```py[^\n]*\n(.*?)```",      # ```py
+                r"```\s*\n(.*?)```",           # ``` (generic)
+            ]
+            for pattern in patterns:
+                for match in re.finditer(pattern, text, re.DOTALL | re.IGNORECASE):
+                    code = match.group(1).strip()
+                    if code:
+                        blocks.append(code)
+
+            # Handle truncated code blocks (no closing ```) - common with token limits
+            truncated_patterns = [
+                r"```python[^\n]*\n((?:(?!```).)*)$",  # ```python at end without closing
+                r"```py[^\n]*\n((?:(?!```).)*)$",     # ```py at end
+                r"```\s*\n((?:(?!```).)*)$",          # ``` at end
+            ]
+            for pattern in truncated_patterns:
+                match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+                if match:
+                    code = match.group(1).strip()
+                    # Only add if it looks like real code (has function/class or multiple lines)
+                    if code and (("def " in code or "class " in code) or code.count("\n") > 2):
+                        blocks.append(code)
+
+            return blocks
+
+        # Helper to pick best code from candidates
+        def pick_best_code(candidates: list[str]) -> str:
+            # Prefer valid Python with function definitions
+            valid_with_func = [c for c in candidates if is_valid_python(c) and ("def " in c or "class " in c)]
+            if valid_with_func:
+                # Return longest valid code with function
+                return max(valid_with_func, key=len)
+            # Fall back to longest valid code
+            valid = [c for c in candidates if is_valid_python(c)]
+            if valid:
+                return max(valid, key=len)
+            # Fall back to longest candidate (may need syntax fixing)
+            if candidates:
+                return max(candidates, key=len)
+            return ""
+
+        candidates = []
+
+        # Strategy 1: Look for code after </think> tag (preferred for QwQ/Qwen)
         if "<think>" in response:
             think_end = response.find("</think>")
             if think_end != -1:
                 after_think = response[think_end + 8:]  # len("</think>") = 8
-                # Try ```python blocks in the post-think section
-                match = re.search(r"```python\n(.*?)```", after_think, re.DOTALL)
-                if match:
-                    return match.group(1).strip()
-                # Try generic ``` blocks
-                match = re.search(r"```\n(.*?)```", after_think, re.DOTALL)
-                if match:
-                    return match.group(1).strip()
+                blocks = find_all_code_blocks(after_think)
+                candidates.extend(blocks)
 
-        # Strategy 2: Try ```python blocks anywhere in response (including inside <think>)
-        match = re.search(r"```python\n(.*?)```", response, re.DOTALL)
-        if match:
-            return match.group(1).strip()
+        # Strategy 2: Find all code blocks anywhere in response
+        all_blocks = find_all_code_blocks(response)
+        candidates.extend(all_blocks)
 
-        # Strategy 3: Try generic ``` blocks
-        match = re.search(r"```\n(.*?)```", response, re.DOTALL)
-        if match:
-            return match.group(1).strip()
+        # Strategy 3: Look for function/class definitions without code blocks
+        # Matches code that starts with def/class and continues until double newline or end
+        func_pattern = r"(?:^|\n)((?:def |class )\w+[^\n]*:(?:\n(?:[ \t]+[^\n]+|\s*))+)"
+        for match in re.finditer(func_pattern, response, re.MULTILINE):
+            code = match.group(1).strip()
+            if code and len(code) > 20:  # Avoid tiny fragments
+                candidates.append(code)
 
-        # Strategy 4: Look for function definitions inside <think> blocks
-        # Sometimes QwQ writes code inline during reasoning
+        # Strategy 4: Look inside <think> blocks for code (QwQ sometimes writes code during reasoning)
         if "<think>" in response:
-            # Extract content inside <think> tag (may be unclosed if token limit hit)
             think_start = response.find("<think>") + 7
             think_end = response.find("</think>")
-            if think_end == -1:
-                think_content = response[think_start:]  # Unclosed tag
-            else:
-                think_content = response[think_start:think_end]
+            think_content = response[think_start:think_end] if think_end != -1 else response[think_start:]
 
-            # Look for function definitions inside thinking
-            def_match = re.search(r"(def \w+\([^)]*\):.*?)(?=\n\n[A-Z]|\nNow|\nSo|\nOkay|$)",
-                                  think_content, re.DOTALL)
-            if def_match:
-                code = def_match.group(1).strip()
-                # Validate it looks like real code (has return or significant logic)
-                if "return" in code or code.count("\n") > 2:
-                    # Additional validation: check it's valid Python syntax (not pseudocode)
-                    try:
-                        compile(code, "<string>", "exec")
-                        logger.info("[Fleet] Extracted code from inside <think> block")
-                        return code
-                    except SyntaxError:
-                        logger.debug("[Fleet] Rejected pseudocode from <think> block (syntax error)")
-                        pass  # Continue to other strategies
+            # Find code blocks inside thinking
+            think_blocks = find_all_code_blocks(think_content)
+            candidates.extend(think_blocks)
 
-        # Strategy 5: Response starts with <think> but no code found - fail cleanly
-        if response.strip().startswith("<think>"):
+            # Also look for inline function definitions in thinking
+            for match in re.finditer(func_pattern, think_content, re.MULTILINE):
+                code = match.group(1).strip()
+                if code and len(code) > 20:
+                    candidates.append(code)
+
+        # Pick best from candidates
+        if candidates:
+            best = pick_best_code(candidates)
+            if best:
+                if is_valid_python(best):
+                    logger.debug(f"[Fleet] Extracted valid code ({len(best)} chars) from {len(candidates)} candidates")
+                else:
+                    logger.debug(f"[Fleet] Extracted code ({len(best)} chars) - may have syntax issues")
+                return best
+
+        # Strategy 5: Raw code without any blocks (starts with def/class/import)
+        stripped = response.strip()
+        # Remove any <think>...</think> content first
+        if "<think>" in stripped:
+            stripped = re.sub(r"<think>.*?</think>", "", stripped, flags=re.DOTALL).strip()
+        if stripped.startswith(("def ", "class ", "import ", "from ")):
+            if is_valid_python(stripped):
+                logger.debug("[Fleet] Extracted raw code (no code blocks)")
+                return stripped
+
+        # Strategy 6: Response is reasoning-only with no code
+        if response.strip().startswith("<think>") or not response.strip():
             logger.warning("[Fleet] Response is reasoning-only with no extractable code")
             return ""
-
-        # Strategy 6: Raw code without any blocks (starts with def/class/import)
-        stripped = response.strip()
-        if stripped.startswith(("def ", "class ", "import ", "from ")):
-            return stripped
 
         # No valid code found
         logger.warning("[Fleet] Could not extract valid Python code from response")
