@@ -119,6 +119,50 @@ class SolutionRecord:
 
 
 @dataclass
+class ArchitectMemory:
+    """Per-run memory for Architect tier (hi_moe-gdf).
+
+    Tracks failed plans within a single run so Architect can avoid
+    repeating the same mistakes. This is agent-private memory, not
+    shared with other tiers.
+    """
+    failed_plans: list[dict] = field(default_factory=list)
+    max_memory: int = 5  # Keep last N failures
+
+    def record_failure(self, plan: str, error: str, task_id: str) -> None:
+        """Record a failed plan attempt."""
+        self.failed_plans.append({
+            "task_id": task_id,
+            "plan": plan[:500],  # Truncate long plans
+            "error": error[:200],  # Truncate long errors
+            "timestamp": datetime.now().isoformat(),
+        })
+        # Trim to max memory
+        if len(self.failed_plans) > self.max_memory:
+            self.failed_plans = self.failed_plans[-self.max_memory:]
+
+    def get_memory_prompt(self) -> str:
+        """Generate context to inject into Architect prompts.
+
+        Returns empty string if no failures recorded.
+        """
+        if not self.failed_plans:
+            return ""
+
+        lines = ["\n\n--- Previous Failed Approaches (avoid these) ---"]
+        for i, failure in enumerate(self.failed_plans[-3:], 1):  # Last 3
+            lines.append(f"\nAttempt {i}:")
+            lines.append(f"  Plan: {failure['plan'][:150]}...")
+            lines.append(f"  Failed because: {failure['error']}")
+        lines.append("\nPlease try a different approach.")
+        return "\n".join(lines)
+
+    def has_failures(self) -> bool:
+        """Check if there are recorded failures."""
+        return len(self.failed_plans) > 0
+
+
+@dataclass
 class ConversationContext:
     """Multi-turn context that persists across runs (hi_moe-ceg).
 
@@ -419,10 +463,12 @@ class AbstractArchitect:
         dispatcher: "RoutingDispatcher",
         llm: LLMClient,
         trajectory_logger: "TrajectoryLogger | None" = None,
+        memory: ArchitectMemory | None = None,
     ):
         self.dispatcher = dispatcher
         self.llm = llm
         self.trajectory_logger = trajectory_logger
+        self.memory = memory or ArchitectMemory()  # Per-run memory (hi_moe-gdf)
 
     async def execute(self, task: Task) -> Outcome:
         """Create execution plan and delegate to Dispatcher with retry (hi_moe-a4w)."""
@@ -459,8 +505,13 @@ class AbstractArchitect:
         """Single execution attempt with planning."""
         logger.info(f"[Architect] Planning task: {task.task_id}")
 
-        # Generate plan using LLM
-        plan_prompt = self._create_plan_prompt(task) + error_context
+        # Build prompt with memory context (hi_moe-gdf)
+        memory_context = self.memory.get_memory_prompt()
+        plan_prompt = self._create_plan_prompt(task) + error_context + memory_context
+
+        if memory_context:
+            logger.info(f"[Architect] Injecting memory of {len(self.memory.failed_plans)} failed approaches")
+
         plan = await self.llm.generate(
             [
                 {
@@ -512,6 +563,15 @@ class AbstractArchitect:
                 else f"Failed: {outcome.error}"
             )
             self.trajectory_logger.log_architect(architect_record)
+
+        # Record failure to memory for future attempts (hi_moe-gdf)
+        if outcome.status != TaskStatus.COMPLETED:
+            self.memory.record_failure(
+                plan=plan,
+                error=outcome.error or "Unknown error",
+                task_id=task.task_id,
+            )
+            logger.info(f"[Architect] Recorded failure to memory (total: {len(self.memory.failed_plans)})")
 
         return outcome
 

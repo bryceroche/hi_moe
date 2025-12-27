@@ -26,6 +26,7 @@ from typing import Any, Callable
 
 from .tiers import (
     AbstractArchitect,
+    ArchitectMemory,
     LLMClient,
     MockLLMClient,
     Outcome,
@@ -180,6 +181,10 @@ class Runner:
         run_id = f"run-{problem.get('id', 'unknown')}-{uuid.uuid4().hex[:8]}"
         context = TaskContext(run_id=run_id)
         self._trajectory = []
+
+        # Reset Architect memory for fresh run (hi_moe-gdf)
+        # Memory persists across retries within a run but resets between different problems
+        self.architect.memory = ArchitectMemory()
 
         start_time = time.monotonic()
 
