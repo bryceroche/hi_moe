@@ -237,12 +237,15 @@ class VLLMServer:
         import uuid
 
         # Format messages as ChatML
-        # Note: Qwen3-32B-AWQ is a regular model without thinking mode,
-        # so no /no_think directive needed (hi_moe-4os)
+        # Qwen3-32B-AWQ has thinking mode enabled by default.
+        # Add /no_think to disable thinking for faster inference (hi_moe-4os)
         prompt = ""
-        for msg in messages:
+        for i, msg in enumerate(messages):
             role = msg["role"]
             content = msg["content"]
+            # Add /no_think to last user message to disable thinking mode
+            if role == "user" and i == len(messages) - 1:
+                content = content + " /no_think"
             prompt += f"<|im_start|>{role}\n{content}<|im_end|>\n"
         prompt += "<|im_start|>assistant\n"
 
