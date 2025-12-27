@@ -113,7 +113,6 @@ class StressTest:
             timeout_per_problem: Timeout in seconds per problem
         """
         logger.info(f"[StressTest] Starting with {len(self.problems)} problems")
-        start_time = time.time()
         self.results = []
 
         semaphore = asyncio.Semaphore(max_parallel)

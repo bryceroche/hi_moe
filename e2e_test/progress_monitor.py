@@ -15,7 +15,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
-from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -335,10 +334,16 @@ class SurpriseDetector:
         return self.history[-limit:]
 
     def get_surprise_rate(self, window: int = 20) -> float:
-        """Get rate of surprising outcomes in recent history."""
-        if len(self.history) < window:
+        """Get rate of surprising outcomes in recent history.
+
+        Returns the proportion of recent tasks that were surprising.
+        Note: This requires external tracking of total outcomes, not just surprises.
+        For now, returns proportion of history that is surprising (always 1.0 if only surprises stored).
+        """
+        if not self.history:
             return 0.0
-        return len(self.history[-window:]) / window
+        # Return count relative to window size as a density metric
+        return min(len(self.history), window) / window
 
     def analyze_patterns(self) -> dict:
         """Analyze surprise patterns."""
@@ -429,9 +434,9 @@ class TrajectoryTracker:
         h = hashlib.md5(text.encode()).hexdigest()
         seed = int(h[:8], 16)
 
-        # Generate pseudo-random vector
-        np.random.seed(seed)
-        embedding = list(np.random.randn(self.embedding_dim) * 0.1)
+        # Generate pseudo-random vector (thread-safe RNG)
+        rng = np.random.default_rng(seed)
+        embedding = list(rng.standard_normal(self.embedding_dim) * 0.1)
 
         self._embedding_cache[text] = embedding
         return embedding

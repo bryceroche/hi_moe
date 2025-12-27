@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import logging
 import math
 from collections import defaultdict
@@ -263,9 +262,9 @@ class StateEvolver:
         h = hashlib.md5(objective.encode()).hexdigest()
         seed = int(h[:8], 16)
 
-        # Generate pseudo-random vector
-        np.random.seed(seed)
-        vector = list(np.random.randn(64) * 0.1)
+        # Generate pseudo-random vector (thread-safe RNG)
+        rng = np.random.default_rng(seed)
+        vector = list(rng.standard_normal(64) * 0.1)
 
         self._hash_cache[objective] = vector
         return vector
