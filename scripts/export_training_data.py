@@ -25,6 +25,200 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from e2e_test.call_db import CallDB
 
 
+def extract_code_from_output(output: str) -> str | None:
+    """Extract Python code from model output."""
+    import re
+
+    # Try to find code in ```python blocks
+    matches = re.findall(r"```python\s*(.*?)```", output, re.DOTALL)
+    if matches:
+        return matches[-1].strip()  # Return last code block
+
+    # Try generic ``` blocks
+    matches = re.findall(r"```\s*(.*?)```", output, re.DOTALL)
+    if matches:
+        return matches[-1].strip()
+
+    return None
+
+
+def export_from_jsonl(
+    runs_dir: Path,
+    output_dir: Path,
+    eval_ratio: float = 0.1,
+) -> dict[str, int]:
+    """Export training data from JSONL trajectory files.
+
+    This is the preferred method as JSONL files contain full output data.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    examples = []
+
+    # Find all JSONL trajectory files
+    jsonl_files = list(runs_dir.rglob("run-*.jsonl"))
+    print(f"Found {len(jsonl_files)} trajectory files")
+
+    for jsonl_file in jsonl_files:
+        try:
+            entries = []
+            with open(jsonl_file) as f:
+                for line in f:
+                    try:
+                        entries.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+
+            # Check if run succeeded (all tests passed)
+            run_end = next((e for e in entries if e.get("type") == "run_end"), None)
+            if not run_end or run_end.get("status") != "completed":
+                continue
+
+            # Get problem info from run_start
+            run_start = next((e for e in entries if e.get("type") == "run_start"), None)
+            if not run_start:
+                continue
+
+            problem_id = run_start.get("problem_id", "")
+
+            # Get problem text from the first vllm_call input (user message)
+            problem = ""
+            vllm_calls = [e for e in entries if e.get("type") == "vllm_call"]
+            if vllm_calls:
+                first_input = vllm_calls[0].get("input", "")
+                # Parse messages format
+                if isinstance(first_input, list):
+                    for msg in first_input:
+                        if msg.get("role") == "user":
+                            content = msg.get("content", "")
+                            # Extract just the task description
+                            if "Task:" in content:
+                                problem = content.split("Task:")[1].split("Context:")[0].strip()
+                            else:
+                                problem = content
+                            break
+                elif isinstance(first_input, str):
+                    problem = first_input
+
+            # Get the final vllm_call with working code
+            vllm_calls = [e for e in entries if e.get("type") == "vllm_call"]
+            if not vllm_calls:
+                continue
+
+            # Use the last call (usually the one that produced working code)
+            last_call = vllm_calls[-1]
+            output = last_call.get("output", "")
+
+            # Extract code from output
+            code = extract_code_from_output(output)
+            if not code:
+                continue
+
+            # Extract reasoning (text before code block)
+            reasoning = output
+            if "```python" in output:
+                reasoning = output.split("```python")[0]
+            elif "```" in output:
+                reasoning = output.split("```")[0]
+
+            # Clean up reasoning (remove <think> tags)
+            import re
+            reasoning = re.sub(r"<think>.*?</think>", "", reasoning, flags=re.DOTALL).strip()
+            if reasoning.startswith("<think>"):
+                # Handle unclosed think tags
+                if "</think>" in reasoning:
+                    reasoning = reasoning.split("</think>", 1)[-1].strip()
+                else:
+                    reasoning = ""  # All thinking, no visible reasoning
+
+            # Determine domain from metadata
+            metadata = last_call.get("metadata", {})
+            specialist = metadata.get("specialist", "python")
+            domain_map = {
+                "python": "python",
+                "python-lora": "python",
+                "math": "math",
+                "math-lora": "math",
+                "algorithms": "algorithms",
+                "algorithms-lora": "algorithms",
+                "data_structures": "data_structures",
+            }
+            domain = domain_map.get(specialist, "python")
+
+            examples.append({
+                "problem": problem[:4000] if problem else "",
+                "reasoning": reasoning[:2000] if reasoning else "",
+                "solution": code[:4000] if code else "",
+                "domain": domain,
+                "problem_id": problem_id,
+                "source_file": str(jsonl_file.name),
+            })
+
+        except Exception as e:
+            print(f"  Error processing {jsonl_file.name}: {e}")
+            continue
+
+    print(f"Found {len(examples)} successful examples with code")
+
+    if len(examples) == 0:
+        print("No training data available yet.")
+        print("\nTo generate training data:")
+        print("1. Ensure Modal inference is working")
+        print("2. Run e2e tests: python -m e2e_test.run_e2e --all --log-dir ./runs")
+        print("3. Re-run this script")
+        return {"train": 0, "eval": 0, "total": 0}
+
+    # Shuffle and split
+    random.shuffle(examples)
+    n_eval = max(1, int(len(examples) * eval_ratio))
+    eval_examples = examples[:n_eval]
+    train_examples = examples[n_eval:]
+
+    # Group by domain
+    domains: dict[str, list[dict]] = {}
+    for ex in examples:
+        domain = ex["domain"]
+        if domain not in domains:
+            domains[domain] = []
+        domains[domain].append(ex)
+
+    # Write combined files
+    with open(output_dir / "train.jsonl", "w") as f:
+        for ex in train_examples:
+            f.write(json.dumps(ex) + "\n")
+
+    with open(output_dir / "eval.jsonl", "w") as f:
+        for ex in eval_examples:
+            f.write(json.dumps(ex) + "\n")
+
+    # Write domain-specific files
+    for domain, domain_examples in domains.items():
+        n_eval_domain = max(1, int(len(domain_examples) * eval_ratio))
+
+        with open(output_dir / f"{domain}_train.jsonl", "w") as f:
+            for ex in domain_examples[n_eval_domain:]:
+                f.write(json.dumps(ex) + "\n")
+
+        with open(output_dir / f"{domain}_eval.jsonl", "w") as f:
+            for ex in domain_examples[:n_eval_domain]:
+                f.write(json.dumps(ex) + "\n")
+
+        print(f"  {domain}: {len(domain_examples)} examples")
+
+    result = {
+        "train": len(train_examples),
+        "eval": len(eval_examples),
+        "total": len(examples),
+        "domains": {k: len(v) for k, v in domains.items()},
+    }
+
+    print(f"\nExported to {output_dir}:")
+    print(f"  train.jsonl: {result['train']} examples")
+    print(f"  eval.jsonl: {result['eval']} examples")
+
+    return result
+
+
 def get_problem_statement(db: CallDB, problem_id: str) -> str | None:
     """Look up original problem statement from trajectory logs."""
     with db._connect() as conn:
@@ -235,13 +429,18 @@ def upload_to_modal(data_dir: Path) -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Export training data from call_db for LoRA fine-tuning"
+        description="Export training data from call_db or JSONL files for LoRA fine-tuning"
+    )
+    parser.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=Path("runs"),
+        help="Directory containing run-*.jsonl trajectory files (default: runs/)",
     )
     parser.add_argument(
         "--db",
         type=Path,
-        default=Path("runs/hi_moe.db"),
-        help="Path to hi_moe.db (default: runs/hi_moe.db)",
+        help="Path to hi_moe.db (deprecated, use --runs-dir instead)",
     )
     parser.add_argument(
         "--output",
@@ -268,18 +467,29 @@ def main():
     )
     args = parser.parse_args()
 
-    if not args.db.exists():
-        print(f"Database not found: {args.db}")
+    # Prefer JSONL export (contains full output data)
+    if args.runs_dir.exists():
+        print(f"Exporting from JSONL files in {args.runs_dir}")
+        result = export_from_jsonl(
+            runs_dir=args.runs_dir,
+            output_dir=args.output,
+        )
+    elif args.db and args.db.exists():
+        print(f"Exporting from database {args.db}")
+        result = export_training_data(
+            db_path=args.db,
+            output_dir=args.output,
+            min_tests_passed=args.min_tests,
+            require_all_tests=args.require_all,
+        )
+    else:
+        print(f"No data source found.")
+        print(f"  Runs directory: {args.runs_dir} (not found)")
+        if args.db:
+            print(f"  Database: {args.db} (not found)")
         print("\nRun e2e tests first to generate training data:")
         print("  python -m e2e_test.run_e2e --all --log-dir ./runs")
         return 1
-
-    result = export_training_data(
-        db_path=args.db,
-        output_dir=args.output,
-        min_tests_passed=args.min_tests,
-        require_all_tests=args.require_all,
-    )
 
     if result["total"] > 0 and args.upload:
         upload_to_modal(args.output)
