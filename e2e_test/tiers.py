@@ -1584,7 +1584,7 @@ class SpecializedFleet:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0.2,
+                temperature=0.3,  # Aligned with baseline for fair comparison (hi_moe-82v)
                 max_tokens=2048,  # Reduced for latency; sufficient for code output
                 adapter=adapter,
             )
