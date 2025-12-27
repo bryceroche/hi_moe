@@ -1254,12 +1254,21 @@ class SpecializedFleet:
         context = task.context
         plan = context.get("plan", "")
         original = context.get("original_task", task.objective)
+        function_name = context.get("function_name", "")
+        function_signature = context.get("function_signature", "")
+
+        # Build function requirement section if available (hi_moe-66w)
+        func_requirement = ""
+        if function_signature:
+            func_requirement = f"\n\nRequired function signature: {function_signature}"
+        elif function_name:
+            func_requirement = f"\n\nFunction must be named: {function_name}"
 
         return f"""Problem:
 {original}
 
 Plan:
-{plan}
+{plan}{func_requirement}
 
 Write a Python solution. Brief analysis (2-3 sentences), then code in ```python``` blocks.
 Do NOT use <think> tags. Output format example:
