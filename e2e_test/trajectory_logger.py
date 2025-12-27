@@ -685,3 +685,296 @@ def extract_training_pairs(records: list[dict], tier: str) -> list[dict]:
                 })
 
     return pairs
+
+
+# Training data collection utilities (hi_moe-vo8)
+
+
+@dataclass
+class TrainingExample:
+    """A single training example in SFT format.
+
+    Matches the format expected by modal_app/training.py.
+    """
+
+    domain: str  # python, math, etc.
+    problem: str  # The problem description
+    reasoning: str  # Chain-of-thought reasoning
+    solution: str  # The final solution (code)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "domain": self.domain,
+            "problem": self.problem,
+            "reasoning": self.reasoning,
+            "solution": self.solution,
+        }
+
+
+class TrajectoryDataCollector:
+    """Collects trajectory data and converts to training format.
+
+    Bridges the gap between trajectory logs (JSONL from runs) and
+    the training pipeline format expected by SFTTrainer.
+
+    Usage:
+        collector = TrajectoryDataCollector(runs_dir="./runs")
+        examples = collector.collect_fleet_examples()
+        collector.write_training_file(examples, "python_training.jsonl")
+    """
+
+    def __init__(self, runs_dir: Path | str = "./runs"):
+        """Initialize collector.
+
+        Args:
+            runs_dir: Directory containing trajectory JSONL files
+        """
+        self.runs_dir = Path(runs_dir)
+
+    def load_all_trajectories(self) -> list[dict]:
+        """Load all trajectory records from all run files.
+
+        Returns:
+            Combined list of all records from all runs
+        """
+        all_records = []
+
+        if not self.runs_dir.exists():
+            logger.warning(f"[TrajectoryDataCollector] Runs dir not found: {self.runs_dir}")
+            return all_records
+
+        for jsonl_file in self.runs_dir.glob("*.jsonl"):
+            try:
+                records = load_trajectory(jsonl_file)
+                all_records.extend(records)
+                logger.debug(f"Loaded {len(records)} records from {jsonl_file.name}")
+            except Exception as e:
+                logger.warning(f"Failed to load {jsonl_file}: {e}")
+
+        logger.info(f"[TrajectoryDataCollector] Loaded {len(all_records)} total records")
+        return all_records
+
+    def collect_fleet_examples(
+        self,
+        require_validation: bool = True,
+        min_code_length: int = 10,
+    ) -> list[TrainingExample]:
+        """Collect training examples from Fleet tier executions.
+
+        Only includes successful executions with validated code.
+
+        Args:
+            require_validation: Only include examples that passed validation
+            min_code_length: Minimum code length to include
+
+        Returns:
+            List of TrainingExample objects ready for training
+        """
+        records = self.load_all_trajectories()
+        pairs = extract_training_pairs(records, "fleet")
+
+        examples = []
+        for pair in pairs:
+            # Extract fields
+            task = pair.get("input", {}).get("task", "")
+            specialist = pair.get("input", {}).get("specialist", "python")
+            prompt = pair.get("input", {}).get("prompt", "")
+            code = pair.get("output", {}).get("code", "")
+            validation = pair.get("validation")
+
+            # Skip if no code
+            if not code or len(code) < min_code_length:
+                continue
+
+            # Skip if validation required but failed
+            if require_validation:
+                if not validation or not validation.get("passed"):
+                    continue
+
+            # Map specialist to domain
+            domain = self._specialist_to_domain(specialist)
+
+            # Build reasoning from prompt and context
+            reasoning = self._build_reasoning(prompt, task, specialist)
+
+            examples.append(TrainingExample(
+                domain=domain,
+                problem=task,
+                reasoning=reasoning,
+                solution=code,
+            ))
+
+        logger.info(f"[TrajectoryDataCollector] Collected {len(examples)} fleet examples")
+        return examples
+
+    def collect_dispatcher_examples(self) -> list[TrainingExample]:
+        """Collect training examples from Dispatcher tier routing decisions.
+
+        Returns:
+            List of TrainingExample objects for routing training
+        """
+        records = self.load_all_trajectories()
+        pairs = extract_training_pairs(records, "dispatcher")
+
+        examples = []
+        for pair in pairs:
+            task = pair.get("input", {}).get("task", "")
+            context = pair.get("input", {}).get("context", "")
+            output = pair.get("output", {})
+
+            routing_decision = output.get("routing_decision", "")
+            rationale = output.get("rationale", "")
+            routing_strategy = output.get("routing_strategy", "")
+
+            # Build solution as structured routing decision
+            solution = self._format_routing_decision(output)
+            if not solution:
+                continue
+
+            # Reasoning is the rationale
+            reasoning = rationale or f"Route using {routing_strategy or routing_decision}"
+
+            examples.append(TrainingExample(
+                domain="routing",
+                problem=f"Route task: {task}\nContext: {context}",
+                reasoning=reasoning,
+                solution=solution,
+            ))
+
+        logger.info(f"[TrajectoryDataCollector] Collected {len(examples)} dispatcher examples")
+        return examples
+
+    def write_training_file(
+        self,
+        examples: list[TrainingExample],
+        output_path: Path | str,
+    ) -> int:
+        """Write training examples to JSONL file.
+
+        Args:
+            examples: List of training examples
+            output_path: Path to write JSONL file
+
+        Returns:
+            Number of examples written
+        """
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(output_path, "w") as f:
+            for example in examples:
+                f.write(json.dumps(example.to_dict()) + "\n")
+
+        logger.info(f"[TrajectoryDataCollector] Wrote {len(examples)} examples to {output_path}")
+        return len(examples)
+
+    def _specialist_to_domain(self, specialist: str) -> str:
+        """Map specialist name to training domain.
+
+        Args:
+            specialist: Specialist name (python, math, etc.)
+
+        Returns:
+            Domain string for training
+        """
+        domain_map = {
+            "python": "python",
+            "math": "math",
+            "algorithm": "algorithms",
+            "data_structures": "data_structures",
+            "optimization": "optimization",
+        }
+        return domain_map.get(specialist, "python")
+
+    def _build_reasoning(self, prompt: str, task: str, specialist: str) -> str:
+        """Build reasoning chain from context.
+
+        Args:
+            prompt: System prompt used
+            task: Task description
+            specialist: Specialist name
+
+        Returns:
+            Reasoning string for training
+        """
+        parts = []
+
+        if prompt:
+            # Extract key reasoning hints from prompt
+            if "step by step" in prompt.lower():
+                parts.append("Approach this step by step.")
+            if "edge cases" in prompt.lower():
+                parts.append("Consider edge cases.")
+
+        parts.append(f"Using {specialist} specialist to solve: {task[:100]}")
+
+        return " ".join(parts) if parts else "Solving the given problem."
+
+    def _format_routing_decision(self, output: dict) -> str:
+        """Format routing decision as structured output.
+
+        Args:
+            output: Routing decision output dict
+
+        Returns:
+            Formatted routing decision string
+        """
+        decision = output.get("routing_decision", "")
+        strategy = output.get("routing_strategy", "")
+        signals = output.get("routing_signals", [])
+        plan_steps = output.get("plan_steps", [])
+
+        if decision == "structured_plan" and plan_steps:
+            steps_str = "\n".join(f"- {s}" for s in plan_steps[:5])
+            return f"ROUTING: structured_plan\nSTRATEGY: {strategy}\nSTEPS:\n{steps_str}"
+        elif decision == "heuristic":
+            signals_str = ", ".join(signals) if signals else "default"
+            return f"ROUTING: heuristic\nSTRATEGY: {strategy}\nSIGNALS: {signals_str}"
+
+        return ""
+
+
+def collect_training_data(
+    runs_dir: Path | str = "./runs",
+    output_dir: Path | str = "./training_data",
+    include_fleet: bool = True,
+    include_dispatcher: bool = True,
+) -> dict:
+    """Convenience function to collect all training data from trajectories.
+
+    Args:
+        runs_dir: Directory containing trajectory JSONL files
+        output_dir: Directory to write training files
+        include_fleet: Include Fleet tier examples
+        include_dispatcher: Include Dispatcher tier examples
+
+    Returns:
+        Summary dict with counts of examples collected
+    """
+    collector = TrajectoryDataCollector(runs_dir)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    summary = {"fleet_examples": 0, "dispatcher_examples": 0}
+
+    if include_fleet:
+        fleet_examples = collector.collect_fleet_examples()
+        if fleet_examples:
+            collector.write_training_file(
+                fleet_examples,
+                output_dir / "fleet_training.jsonl",
+            )
+            summary["fleet_examples"] = len(fleet_examples)
+
+    if include_dispatcher:
+        dispatcher_examples = collector.collect_dispatcher_examples()
+        if dispatcher_examples:
+            collector.write_training_file(
+                dispatcher_examples,
+                output_dir / "dispatcher_training.jsonl",
+            )
+            summary["dispatcher_examples"] = len(dispatcher_examples)
+
+    logger.info(f"[collect_training_data] Summary: {summary}")
+    return summary

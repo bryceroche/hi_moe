@@ -636,3 +636,281 @@ class TestExtractTrainingPairs:
         fleet_pairs = extract_training_pairs(training_records, "fleet")
         assert len(architect_pairs) == 1  # Only the successful one
         assert len(fleet_pairs) == 1  # Only the successful one
+
+
+# Tests for hi_moe-vo8: Trajectory data collection for training
+
+
+from .trajectory_logger import (
+    TrainingExample,
+    TrajectoryDataCollector,
+    collect_training_data,
+)
+
+
+class TestTrainingExample:
+    """Tests for TrainingExample dataclass."""
+
+    def test_basic_example(self):
+        example = TrainingExample(
+            domain="python",
+            problem="Write a function to add two numbers",
+            reasoning="Using basic arithmetic",
+            solution="def add(a, b):\n    return a + b",
+        )
+        assert example.domain == "python"
+        assert "add" in example.solution
+
+    def test_to_dict(self):
+        example = TrainingExample(
+            domain="python",
+            problem="Write a function",
+            reasoning="Approach step by step",
+            solution="def solve(): pass",
+        )
+        d = example.to_dict()
+        assert d["domain"] == "python"
+        assert d["problem"] == "Write a function"
+        assert d["reasoning"] == "Approach step by step"
+        assert d["solution"] == "def solve(): pass"
+
+
+class TestTrajectoryDataCollector:
+    """Tests for TrajectoryDataCollector class."""
+
+    @pytest.fixture
+    def temp_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            yield Path(tmpdir)
+
+    @pytest.fixture
+    def sample_trajectory_file(self, temp_dir):
+        """Create a sample trajectory JSONL file."""
+        records = [
+            {"type": "run_start", "run_id": "test-run"},
+            {
+                "type": "fleet_execution",
+                "task_id": "task-1",
+                "task_objective": "Write two sum function",
+                "specialist": "python",
+                "prompt_used": "You are a Python expert. Solve step by step.",
+                "output_code": "def twoSum(nums, target):\n    seen = {}\n    for i, n in enumerate(nums):\n        if target - n in seen:\n            return [seen[target-n], i]\n        seen[n] = i",
+                "status": "success",
+                "validation_result": {"passed": True, "total_passed": 3},
+            },
+            {
+                "type": "fleet_execution",
+                "task_id": "task-2",
+                "task_objective": "Write fibonacci",
+                "specialist": "python",
+                "output_code": "def fib(n): return n if n < 2 else fib(n-1) + fib(n-2)",
+                "status": "success",
+                "validation_result": {"passed": True},
+            },
+            {
+                "type": "fleet_execution",
+                "task_id": "task-3",
+                "task_objective": "Failed task",
+                "specialist": "python",
+                "output_code": "broken",
+                "status": "success",
+                "validation_result": {"passed": False, "total_failed": 2},
+            },
+            {
+                "type": "dispatcher_routing",
+                "task_id": "task-1",
+                "task_objective": "Implement two sum",
+                "routing_decision": "structured_plan",
+                "routing_strategy": "python_direct",
+                "plan_steps": ["Analyze problem", "Implement solution"],
+                "rationale": "Simple implementation task",
+                "context_summary": "Two sum problem from LeetCode",
+                "outcome_status": "completed",
+            },
+            {"type": "run_end", "run_id": "test-run"},
+        ]
+        file_path = temp_dir / "test-run.jsonl"
+        with open(file_path, "w") as f:
+            for r in records:
+                f.write(json.dumps(r) + "\n")
+        return temp_dir
+
+    def test_load_all_trajectories(self, sample_trajectory_file):
+        collector = TrajectoryDataCollector(sample_trajectory_file)
+        records = collector.load_all_trajectories()
+
+        assert len(records) == 6  # All records from the file
+        fleet_records = [r for r in records if r.get("type") == "fleet_execution"]
+        assert len(fleet_records) == 3
+
+    def test_load_trajectories_missing_dir(self, temp_dir):
+        collector = TrajectoryDataCollector(temp_dir / "nonexistent")
+        records = collector.load_all_trajectories()
+        assert records == []
+
+    def test_collect_fleet_examples_with_validation(self, sample_trajectory_file):
+        collector = TrajectoryDataCollector(sample_trajectory_file)
+        examples = collector.collect_fleet_examples(require_validation=True)
+
+        # Only 2 examples passed validation
+        assert len(examples) == 2
+        assert all(isinstance(e, TrainingExample) for e in examples)
+        assert examples[0].domain == "python"
+        assert "twoSum" in examples[0].solution
+
+    def test_collect_fleet_examples_without_validation(self, sample_trajectory_file):
+        collector = TrajectoryDataCollector(sample_trajectory_file)
+        examples = collector.collect_fleet_examples(require_validation=False, min_code_length=1)
+
+        # All 3 fleet records included (validation not required, min_code_length=1)
+        assert len(examples) == 3
+
+    def test_collect_fleet_examples_min_code_length(self, sample_trajectory_file):
+        collector = TrajectoryDataCollector(sample_trajectory_file)
+        examples = collector.collect_fleet_examples(
+            require_validation=False,
+            min_code_length=50,  # Excludes short code
+        )
+
+        # Only includes code longer than 50 chars
+        for example in examples:
+            assert len(example.solution) >= 50
+
+    def test_collect_dispatcher_examples(self, sample_trajectory_file):
+        collector = TrajectoryDataCollector(sample_trajectory_file)
+        examples = collector.collect_dispatcher_examples()
+
+        assert len(examples) == 1
+        assert examples[0].domain == "routing"
+        assert "ROUTING: structured_plan" in examples[0].solution
+        assert "python_direct" in examples[0].solution
+
+    def test_write_training_file(self, temp_dir):
+        collector = TrajectoryDataCollector(temp_dir)
+        examples = [
+            TrainingExample(
+                domain="python",
+                problem="Test problem",
+                reasoning="Test reasoning",
+                solution="def test(): pass",
+            ),
+        ]
+
+        output_path = temp_dir / "output" / "training.jsonl"
+        count = collector.write_training_file(examples, output_path)
+
+        assert count == 1
+        assert output_path.exists()
+
+        # Verify content
+        with open(output_path) as f:
+            lines = [json.loads(line) for line in f]
+        assert len(lines) == 1
+        assert lines[0]["domain"] == "python"
+        assert lines[0]["solution"] == "def test(): pass"
+
+    def test_specialist_to_domain(self, temp_dir):
+        collector = TrajectoryDataCollector(temp_dir)
+
+        assert collector._specialist_to_domain("python") == "python"
+        assert collector._specialist_to_domain("math") == "math"
+        assert collector._specialist_to_domain("algorithm") == "algorithms"
+        assert collector._specialist_to_domain("unknown") == "python"  # Default
+
+    def test_build_reasoning(self, temp_dir):
+        collector = TrajectoryDataCollector(temp_dir)
+
+        # Test with step by step hint
+        reasoning = collector._build_reasoning(
+            prompt="Solve this step by step",
+            task="Two sum problem",
+            specialist="python",
+        )
+        assert "step by step" in reasoning.lower()
+        assert "python" in reasoning.lower()
+
+        # Test with edge cases hint
+        reasoning = collector._build_reasoning(
+            prompt="Consider edge cases carefully",
+            task="Sort array",
+            specialist="algorithm",
+        )
+        assert "edge cases" in reasoning.lower()
+
+
+class TestCollectTrainingDataConvenience:
+    """Tests for collect_training_data convenience function."""
+
+    @pytest.fixture
+    def temp_dirs(self):
+        with tempfile.TemporaryDirectory() as runs_dir:
+            with tempfile.TemporaryDirectory() as output_dir:
+                # Create a sample run
+                records = [
+                    {"type": "run_start", "run_id": "run-1"},
+                    {
+                        "type": "fleet_execution",
+                        "task_id": "task-1",
+                        "task_objective": "Write code",
+                        "specialist": "python",
+                        "output_code": "def solve(): return 42",
+                        "status": "success",
+                        "validation_result": {"passed": True},
+                    },
+                    {
+                        "type": "dispatcher_routing",
+                        "task_id": "task-1",
+                        "task_objective": "Route task",
+                        "routing_decision": "heuristic",
+                        "routing_strategy": "python_direct",
+                        "routing_signals": ["simple_task"],
+                        "rationale": "Direct to python",
+                        "outcome_status": "completed",
+                    },
+                    {"type": "run_end", "run_id": "run-1"},
+                ]
+                with open(Path(runs_dir) / "run-1.jsonl", "w") as f:
+                    for r in records:
+                        f.write(json.dumps(r) + "\n")
+
+                yield Path(runs_dir), Path(output_dir)
+
+    def test_collect_all(self, temp_dirs):
+        runs_dir, output_dir = temp_dirs
+
+        summary = collect_training_data(
+            runs_dir=runs_dir,
+            output_dir=output_dir,
+            include_fleet=True,
+            include_dispatcher=True,
+        )
+
+        assert summary["fleet_examples"] == 1
+        assert summary["dispatcher_examples"] == 1
+        assert (output_dir / "fleet_training.jsonl").exists()
+        assert (output_dir / "dispatcher_training.jsonl").exists()
+
+    def test_collect_fleet_only(self, temp_dirs):
+        runs_dir, output_dir = temp_dirs
+
+        summary = collect_training_data(
+            runs_dir=runs_dir,
+            output_dir=output_dir,
+            include_fleet=True,
+            include_dispatcher=False,
+        )
+
+        assert summary["fleet_examples"] == 1
+        assert summary["dispatcher_examples"] == 0
+        assert (output_dir / "fleet_training.jsonl").exists()
+        assert not (output_dir / "dispatcher_training.jsonl").exists()
+
+    def test_collect_empty_runs(self):
+        with tempfile.TemporaryDirectory() as runs_dir:
+            with tempfile.TemporaryDirectory() as output_dir:
+                summary = collect_training_data(
+                    runs_dir=runs_dir,
+                    output_dir=output_dir,
+                )
+                assert summary["fleet_examples"] == 0
+                assert summary["dispatcher_examples"] == 0
