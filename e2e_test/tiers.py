@@ -5,7 +5,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Optional, Union, TYPE_CHECKING
 
@@ -482,7 +482,7 @@ class AbstractArchitect:
         if self.trajectory_logger:
             from .trajectory_logger import ArchitectRecord
             architect_record = ArchitectRecord(
-                ts=datetime.utcnow().isoformat(),
+                ts=datetime.now(timezone.utc).isoformat(),
                 task_id=task.task_id,
                 goal=task.objective,
                 plan=plan,
@@ -573,7 +573,7 @@ class RoutingDispatcher:
             if self.trajectory_logger:
                 from .trajectory_logger import DispatcherRecord
                 dispatcher_record = DispatcherRecord(
-                    ts=datetime.utcnow().isoformat(),
+                    ts=datetime.now(timezone.utc).isoformat(),
                     task_id=task.task_id,
                     task_objective=task.objective,
                     routing_decision="heuristic",
@@ -652,7 +652,7 @@ class RoutingDispatcher:
         if self.trajectory_logger:
             from .trajectory_logger import DispatcherRecord
             dispatcher_record = DispatcherRecord(
-                ts=datetime.utcnow().isoformat(),
+                ts=datetime.now(timezone.utc).isoformat(),
                 task_id=task.task_id,
                 task_objective=task.objective,
                 routing_decision="structured_plan",
@@ -982,7 +982,7 @@ class SpecializedFleet:
                         if self.trajectory_logger:
                             from .trajectory_logger import FleetRecord
                             fleet_record = FleetRecord(
-                                ts=datetime.utcnow().isoformat(),
+                                ts=datetime.now(timezone.utc).isoformat(),
                                 task_id=task.task_id,
                                 task_objective=task.objective,
                                 specialist=specialist,
@@ -1019,7 +1019,7 @@ class SpecializedFleet:
             if self.trajectory_logger:
                 from .trajectory_logger import FleetRecord
                 fleet_record = FleetRecord(
-                    ts=datetime.utcnow().isoformat(),
+                    ts=datetime.now(timezone.utc).isoformat(),
                     task_id=task.task_id,
                     task_objective=task.objective,
                     specialist=specialist,
@@ -1042,7 +1042,7 @@ class SpecializedFleet:
             if self.trajectory_logger:
                 from .trajectory_logger import FleetRecord
                 fleet_record = FleetRecord(
-                    ts=datetime.utcnow().isoformat(),
+                    ts=datetime.now(timezone.utc).isoformat(),
                     task_id=task.task_id,
                     task_objective=task.objective,
                     specialist=specialist,

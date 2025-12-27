@@ -23,7 +23,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -184,7 +184,7 @@ class TrajectoryLogger:
         start_record = {
             "type": "run_start",
             "run_id": run_id,
-            "ts": datetime.utcnow().isoformat(),
+            "ts": datetime.now(timezone.utc).isoformat(),
             **(metadata or {}),
         }
         self._write_record(start_record)
@@ -252,7 +252,7 @@ class TrajectoryLogger:
         end_record = {
             "type": "run_end",
             "run_id": self._current_run_id,
-            "ts": datetime.utcnow().isoformat(),
+            "ts": datetime.now(timezone.utc).isoformat(),
             "total_calls": self._call_count,
             **(result or {}),
         }
@@ -379,7 +379,7 @@ class LoggingLLMClient:
         """
         call_id = f"call-{uuid.uuid4().hex[:8]}"
         start_time = time.monotonic()
-        ts = datetime.utcnow().isoformat()
+        ts = datetime.now(timezone.utc).isoformat()
 
         try:
             # Call underlying client

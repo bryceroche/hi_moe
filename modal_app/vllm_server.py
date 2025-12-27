@@ -155,10 +155,10 @@ class VLLMServer:
         """Log interaction to JSONL file for training data collection."""
         import json
         import os
-        from datetime import datetime
+        from datetime import datetime, timezone
 
         log_entry = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "request_id": request_id,
             "model": MODEL_ID,
             "adapter": adapter_name,
@@ -177,7 +177,7 @@ class VLLMServer:
         }
 
         # Write to daily log file
-        date_str = datetime.utcnow().strftime("%Y-%m-%d")
+        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         log_file = f"{LOGS_PATH}/interactions_{date_str}.jsonl"
 
         try:

@@ -19,7 +19,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
@@ -379,7 +379,7 @@ class Runner:
     def _log_tier_call(self, tier: str, task: Task, outcome: Outcome) -> None:
         """Log a tier call for trajectory tracking."""
         entry = {
-            "ts": datetime.utcnow().isoformat(),
+            "ts": datetime.now(timezone.utc).isoformat(),
             "tier": tier,
             "task_id": task.task_id,
             "objective": task.objective[:100],  # Truncate for logging
