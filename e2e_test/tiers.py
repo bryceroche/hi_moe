@@ -1041,6 +1041,13 @@ class RoutingDispatcher:
             dispatcher_record.outcome_status = final_outcome.status.value
             self.trajectory_logger.log_dispatcher(dispatcher_record)
 
+        # Update routing outcome in training DB (hi_moe-ehx)
+        if self.call_db and run_id:
+            self.call_db.update_routing_outcome(
+                run_id=run_id,
+                decision_correct=True,
+            )
+
         return final_outcome
 
     def _select_specialist(
