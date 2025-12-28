@@ -57,7 +57,20 @@ Adapters are served via vLLM with dynamic loading. The system queries available 
 - **Base model**: Qwen2.5-32B-Instruct (for Monitor, Architect, Dispatcher)
 - **Code specialists**: Qwen2.5-Coder-32B-Instruct (no adapter needed)
 - **Math specialists**: Qwen2.5-32B-Instruct + LIMO adapter
-- **Other specialists**: Train custom adapters on Qwen2.5-32B-Instruct
+- **Debugging specialists**: Qwen2.5-Coder-32B-Instruct (no adapter needed - see below)
+- **Refactoring specialists**: Qwen2.5-Coder-32B-Instruct (no adapter needed - see below)
+
+### Debugging & Refactoring: No Adapters Needed (hi_moe-g2p)
+
+**Finding:** No HuggingFace adapters exist for debugging/refactoring, but **Qwen2.5-Coder-32B already excels at these tasks**:
+
+| Capability | Benchmark | Score | Notes |
+|------------|-----------|-------|-------|
+| Code Repair | [Aider](https://aider.chat/docs/leaderboards/) | 73.7% | Comparable to GPT-4o, 4th overall |
+| Multi-lang Repair | MdEval | 75.2 | **#1 among open-source models** |
+| Refactoring | Qualitative | Strong | "identify issues, suggest optimizations, refactor legacy code" |
+
+**Recommendation:** Use Qwen2.5-Coder-32B-Instruct directly for debugging and refactoring specialists. No adapter overhead, SOTA performance built-in
 
 ## Available HuggingFace Options
 
