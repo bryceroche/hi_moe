@@ -142,6 +142,7 @@ class Runner:
         enable_embedding_routing: bool = False,
         routing_mode: str | RoutingMode = "winner_take_all",
         enable_adapters: bool = True,  # Disable for A/B testing (hi_moe-e1v)
+        routing_llm: LLMClient | MockLLMClient | None = None,  # Lightweight model for routing (hi_moe-4gd)
     ):
         """Initialize the Runner.
 
@@ -160,6 +161,8 @@ class Runner:
                 - "probabilistic": Sample proportionally to similarity scores
                 - "blended": Return blend weights for LoRA composition
             enable_adapters: Enable LoRA adapters in Fleet (hi_moe-e1v)
+            routing_llm: Optional lightweight LLM for Architect/Dispatcher (hi_moe-4gd).
+                If provided, uses this for routing/planning while main llm handles code gen.
         """
         # Parse routing mode if string
         if isinstance(routing_mode, str):
@@ -197,9 +200,16 @@ class Runner:
             self.trajectory_logger = TrajectoryLogger(self.log_dir)
             # Wrap LLM client to log all calls
             self.llm = LoggingLLMClient(llm, self.trajectory_logger)
+            # Also wrap routing LLM if provided (hi_moe-4gd)
+            if routing_llm:
+                self.routing_llm = LoggingLLMClient(routing_llm, self.trajectory_logger)
+                logger.info("[Runner] Routing LLM enabled with separate lightweight model (hi_moe-4gd)")
+            else:
+                self.routing_llm = self.llm
             logger.info(f"[Runner] Trajectory logging enabled, writing to {self.log_dir}")
         else:
             self.llm = llm
+            self.routing_llm = routing_llm if routing_llm else llm
 
         # Initialize tiers with (potentially wrapped) LLM and trajectory logger (hi_moe-r8q)
         # Wire CodeRunner to Fleet for self-healing (hi_moe-ld8)
@@ -220,9 +230,11 @@ class Runner:
             except ImportError as e:
                 logger.warning(f"[Runner] Embedding routing unavailable: {e}")
 
+        # Use routing_llm for Dispatcher/Architect planning (hi_moe-4gd)
+        # This allows a smaller, faster model for routing decisions
         self.dispatcher = RoutingDispatcher(
             self.fleet,
-            self.llm,
+            self.routing_llm,  # Use lightweight routing LLM (hi_moe-4gd)
             trajectory_logger=self.trajectory_logger,
             call_db=self.call_db,  # Wire call_db for routing decision logging (hi_moe-ehx)
             memory=self.dispatcher_memory,
@@ -231,7 +243,9 @@ class Runner:
         )
         if self.routing_mode != RoutingMode.WINNER_TAKE_ALL:
             logger.info(f"[Runner] Weighted routing enabled: {self.routing_mode.value} (hi_moe-zrn)")
-        self.architect = AbstractArchitect(self.dispatcher, self.llm, trajectory_logger=self.trajectory_logger)
+        self.architect = AbstractArchitect(
+            self.dispatcher, self.routing_llm, trajectory_logger=self.trajectory_logger  # Use routing LLM (hi_moe-4gd)
+        )
         self.monitor = ProgressMonitor(self.architect)
 
         # Current run state (legacy, for backward compatibility)
