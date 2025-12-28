@@ -20,10 +20,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from .test_problems import ALL_PROBLEMS, TEST_PROBLEM, MEDIUM_PROBLEM
-from .runner import Runner, RunStatus, create_runner
-from .tiers import LLMClient, MockLLMClient, RoutingMode
-from .call_db import CallDB
+from .test_problems import ALL_PROBLEMS
+from .runner import RunStatus, create_runner
 from .validator import validate_solution
 
 logging.basicConfig(
@@ -54,7 +52,6 @@ class BenchmarkSummary:
     results: list[BenchmarkResult] = field(default_factory=list)
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
     endpoint: str = "mock"
-    routing_mode: str = "winner_take_all"
 
     def success_rate(self) -> float:
         if not self.results:
@@ -84,7 +81,6 @@ class BenchmarkSummary:
         return {
             "timestamp": self.timestamp,
             "endpoint": self.endpoint,
-            "routing_mode": self.routing_mode,
             "total_problems": len(self.results),
             "success_rate": self.success_rate(),
             "total_tokens": self.total_tokens(),
@@ -172,13 +168,11 @@ async def run_benchmark(
     problems: list[dict],
     endpoint: str | None = None,
     mock: bool = False,
-    routing_mode: RoutingMode = RoutingMode.WINNER_TAKE_ALL,
     log_dir: Path = Path("runs"),
 ) -> BenchmarkSummary:
     """Run benchmark on a set of problems."""
     summary = BenchmarkSummary(
         endpoint=endpoint or "mock",
-        routing_mode=routing_mode.value,
     )
 
     # Create runner using factory
@@ -193,7 +187,6 @@ async def run_benchmark(
     print(f"{'='*60}")
     print(f"Problems: {len(problems)}")
     print(f"Endpoint: {summary.endpoint}")
-    print(f"Routing:  {summary.routing_mode}")
     print(f"{'='*60}\n")
 
     for i, problem in enumerate(problems, 1):
@@ -263,8 +256,6 @@ def main():
     parser.add_argument("--all", action="store_true", help="Run all problems")
     parser.add_argument("--easy", action="store_true", help="Run only easy problems")
     parser.add_argument("--n", type=int, default=5, help="Number of problems to run")
-    parser.add_argument("--routing", choices=["winner_take_all", "probabilistic", "blended", "ensemble"],
-                       default="winner_take_all", help="Routing mode")
     parser.add_argument("--report", action="store_true", help="Generate report from DB")
     parser.add_argument("--output", type=Path, default=Path("runs/benchmarks"), help="Output directory")
     parser.add_argument("--db", type=Path, default=Path("runs/hi_moe.db"), help="Database path")
@@ -294,15 +285,11 @@ def main():
         endpoint = None
         print("Using MockLLMClient")
 
-    # Parse routing mode
-    routing_mode = RoutingMode(args.routing)
-
     # Run benchmark
     summary = asyncio.run(run_benchmark(
         problems=problems,
         endpoint=endpoint,
         mock=not args.live,
-        routing_mode=routing_mode,
     ))
 
     # Print results
