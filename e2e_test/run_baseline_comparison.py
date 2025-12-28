@@ -296,6 +296,11 @@ async def main():
         help="Modal vLLM endpoint URL",
     )
     parser.add_argument(
+        "--router-endpoint",
+        default=None,
+        help="Optional router endpoint for lightweight Architect/Dispatcher (hi_moe-9m2)",
+    )
+    parser.add_argument(
         "--mock",
         action="store_true",
         help="Use mock LLM (no Modal required)",
@@ -314,6 +319,7 @@ async def main():
     args = parser.parse_args()
 
     # Setup LLM
+    routing_llm = None
     if args.mock:
         logger.info("Using mock LLM")
         llm = MockLLMClient()
@@ -324,12 +330,23 @@ async def main():
             sys.exit(1)
         llm = LLMClient(args.endpoint)
 
+        # Create lightweight router LLM if endpoint provided (hi_moe-9m2)
+        if args.router_endpoint:
+            logger.info(f"Using router endpoint: {args.router_endpoint}")
+            router_healthy = await health_check(args.router_endpoint)
+            if not router_healthy:
+                logger.error("Router endpoint health check failed")
+                sys.exit(1)
+            routing_llm = LLMClient(args.router_endpoint)
+            logger.info("Routing LLM initialized for Architect/Dispatcher")
+
     # Create hierarchy runner
     enable_adapters = not args.no_adapters
     if not enable_adapters:
         logger.info("Adapters DISABLED for this run (hi_moe-e1v experiment)")
     runner = Runner(
         llm=llm,
+        routing_llm=routing_llm,  # Lightweight model for Architect/Dispatcher (hi_moe-9m2)
         log_dir="./runs/comparison",
         enable_trajectory_logging=True,
         enable_adapters=enable_adapters,  # Toggle adapters for A/B testing (hi_moe-e1v)

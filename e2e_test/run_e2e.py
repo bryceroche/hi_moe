@@ -164,6 +164,11 @@ async def main():
         help="Modal vLLM endpoint URL",
     )
     parser.add_argument(
+        "--router-endpoint",
+        default=None,
+        help="Optional router endpoint for lightweight Architect/Dispatcher (hi_moe-9m2)",
+    )
+    parser.add_argument(
         "--mock",
         action="store_true",
         help="Use mock LLM (no Modal required)",
@@ -228,6 +233,7 @@ async def main():
     code_runner = None  # Disable Fleet self-healing for function-call tests
 
     # Create unified Runner with all tiers wired together (hi_moe-ld8)
+    routing_llm = None
     if args.mock:
         logger.info("Using mock LLM (no Modal required)")
         llm = MockLLMClient()
@@ -243,9 +249,22 @@ async def main():
             sys.exit(1)
         llm = LLMClient(args.endpoint)
 
+        # Create lightweight router LLM if endpoint provided (hi_moe-9m2)
+        if args.router_endpoint:
+            logger.info(f"Using router endpoint: {args.router_endpoint}")
+            router_healthy = await health_check(args.router_endpoint, warmup=warmup)
+            if not router_healthy:
+                logger.error(
+                    "Router endpoint health check failed. Deploy with: modal deploy modal_app/vllm_server_light.py"
+                )
+                sys.exit(1)
+            routing_llm = LLMClient(args.router_endpoint)
+            logger.info("Routing LLM initialized for Architect/Dispatcher")
+
     # Create the unified Runner that wires all tiers together
     runner = Runner(
         llm=llm,
+        routing_llm=routing_llm,  # Lightweight model for Architect/Dispatcher (hi_moe-9m2)
         log_dir=args.log_dir,
         code_runner=code_runner,
         enable_trajectory_logging=True,
