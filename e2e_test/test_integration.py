@@ -81,7 +81,8 @@ class TestTierRouting:
         # Check that routing was recorded
         assert len(dispatcher.memory.routing_history) > 0
         last_routing = dispatcher.memory.routing_history[-1]
-        assert last_routing["task_id"] == "test_memory"
+        # Task ID may include step suffix (e.g., "test_memory-step1")
+        assert "test_memory" in last_routing["task_id"]
         assert "specialist" in last_routing
 
     @pytest.mark.asyncio
@@ -254,6 +255,7 @@ class TestCallDB:
 
         val_id = db.log_validation(
             call_id=call_id,
+            run_id="run1",
             problem_id="problem1",
             passed=True,
             tests_passed=5,
@@ -293,6 +295,7 @@ class TestCallDB:
         )
         db.log_validation(
             call_id=call_id,
+            run_id="run1",
             problem_id="p1",
             passed=True,
             tests_passed=3,
@@ -324,6 +327,7 @@ class TestCallDB:
             )
             db.log_validation(
                 call_id=call_id,
+                run_id="run1",
                 problem_id="p1",
                 passed=True,
                 tests_passed=3,
@@ -401,45 +405,27 @@ class TestAdaptiveConfidence:
             db_path = Path(tmpdir) / "test.db"
             db = CallDB(db_path)
 
-            # Add successful python calls
+            # Add successful python routing decisions
             for i in range(10):
-                call_id = db.log_call(
+                db.log_routing_decision(
                     run_id=f"run{i}",
                     problem_id=f"p{i}",
-                    tier="fleet",
-                    specialist="python",
-                    tokens_in=100,
-                    tokens_out=50,
-                    latency_ms=500.0,
-                    success=True,
+                    selected_specialist="python",
+                    confidence=0.8,
                 )
-                db.log_validation(
-                    call_id=call_id,
-                    problem_id=f"p{i}",
-                    passed=True,
-                    tests_passed=3,
-                    tests_total=3,
-                )
+                # Mark as correct
+                db.update_routing_outcome(f"run{i}", decision_correct=True)
 
-            # Add some failing math calls
+            # Add failing math routing decisions
             for i in range(5):
-                call_id = db.log_call(
+                db.log_routing_decision(
                     run_id=f"math_run{i}",
                     problem_id=f"math_p{i}",
-                    tier="fleet",
-                    specialist="math",
-                    tokens_in=100,
-                    tokens_out=50,
-                    latency_ms=500.0,
-                    success=False,
+                    selected_specialist="math",
+                    confidence=0.6,
                 )
-                db.log_validation(
-                    call_id=call_id,
-                    problem_id=f"math_p{i}",
-                    passed=False,
-                    tests_passed=0,
-                    tests_total=3,
-                )
+                # Mark as incorrect
+                db.update_routing_outcome(f"math_run{i}", decision_correct=False)
 
             yield db
 
