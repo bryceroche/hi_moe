@@ -48,6 +48,7 @@ from .trajectory_logger import (
     create_logging_client,
 )
 from .call_db import CallDB
+from .insight_extractor import InsightExtractor
 
 logger = logging.getLogger(__name__)
 
@@ -174,8 +175,10 @@ class Runner:
 
         # Initialize training data DB (hi_moe-828)
         self.call_db: CallDB | None = None
+        self.insight_extractor: InsightExtractor | None = None
         if enable_training_db:
             self.call_db = CallDB(self.log_dir / "hi_moe.db")
+            self.insight_extractor = InsightExtractor(self.call_db)
             logger.info(f"[Runner] Training DB enabled at {self.log_dir / 'hi_moe.db'}")
 
         # Initialize persistent agent memories (hi_moe-ycg)
@@ -328,6 +331,29 @@ class Runner:
                 status = RunStatus.FAILED
 
             context.set("status", status.value)
+
+            # Extract insights before context is discarded (hi_moe-3k7)
+            if self.insight_extractor and code:
+                try:
+                    tests_passed = 0
+                    tests_total = 0
+                    if validation:
+                        tests_passed = validation.get("passed_count", 0)
+                        tests_total = validation.get("total", len(problem.get("test_cases", [])))
+
+                    self.insight_extractor.extract_from_run(
+                        run_id=run_id,
+                        problem_id=problem.get("id", "unknown"),
+                        code=code,
+                        passed=(status == RunStatus.COMPLETED),
+                        tests_passed=tests_passed,
+                        tests_total=tests_total,
+                        error=validation.get("error") if validation else None,
+                        retry_history=context.get("retry_history"),
+                        routing_decision=context.get("routing_decision"),
+                    )
+                except Exception as e:
+                    logger.warning(f"[Runner] Insight extraction failed: {e}")
 
             result = RunResult(
                 run_id=run_id,

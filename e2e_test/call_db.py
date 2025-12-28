@@ -309,6 +309,61 @@ class CallDB:
                 JOIN calls retry ON retry.id = r.retry_call_id
                 LEFT JOIN validations rv ON rv.call_id = r.retry_call_id
                 WHERE r.retry_succeeded = 1;
+
+                -- =================================================================
+                -- INSIGHTS TABLE (hi_moe-3k7)
+                -- Persists valuable learnings from context windows before discard
+                -- =================================================================
+
+                CREATE TABLE IF NOT EXISTS insights (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT,
+                    problem_id TEXT,
+
+                    -- Insight classification
+                    insight_type TEXT NOT NULL,  -- successful_pattern, debugging_breakthrough, routing_decision, strategy
+                    category TEXT,               -- code, architecture, optimization, error_handling, etc.
+                    confidence REAL DEFAULT 0.5, -- 0-1 score of how valuable this insight is
+
+                    -- Content
+                    title TEXT NOT NULL,         -- Brief description
+                    description TEXT,            -- Detailed explanation
+                    context TEXT,                -- Surrounding context that led to insight
+
+                    -- Artifacts
+                    code_snippet TEXT,           -- Associated code if applicable
+                    error_before TEXT,           -- Error that was fixed (for debugging insights)
+                    solution TEXT,               -- Solution that worked
+
+                    -- Linking
+                    call_id INTEGER REFERENCES calls(id),
+                    validation_id INTEGER REFERENCES validations(id),
+
+                    -- Quality signals
+                    tests_passed INTEGER DEFAULT 0,
+                    execution_time_ms INTEGER,
+                    reuse_count INTEGER DEFAULT 0,  -- How many times this insight was retrieved
+
+                    -- Metadata
+                    tags TEXT,                   -- JSON array of tags for search
+                    embedding TEXT,              -- JSON array of floats for semantic search
+                    metadata TEXT,               -- JSON for additional data
+
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_insights_type ON insights(insight_type);
+                CREATE INDEX IF NOT EXISTS idx_insights_category ON insights(category);
+                CREATE INDEX IF NOT EXISTS idx_insights_problem ON insights(problem_id);
+                CREATE INDEX IF NOT EXISTS idx_insights_confidence ON insights(confidence DESC);
+                CREATE INDEX IF NOT EXISTS idx_insights_created ON insights(created_at DESC);
+
+                -- View for high-value insights (confidence > 0.7)
+                CREATE VIEW IF NOT EXISTS valuable_insights AS
+                SELECT * FROM insights
+                WHERE confidence >= 0.7
+                ORDER BY confidence DESC, reuse_count DESC;
             """)
 
     @contextmanager
@@ -601,6 +656,228 @@ class CallDB:
                 "successes": successes,
             }
         return rates
+
+    # -------------------------------------------------------------------------
+    # Insights persistence (hi_moe-3k7)
+    # -------------------------------------------------------------------------
+
+    def log_insight(
+        self,
+        insight_type: str,
+        title: str,
+        run_id: str | None = None,
+        problem_id: str | None = None,
+        category: str | None = None,
+        confidence: float = 0.5,
+        description: str | None = None,
+        context: str | None = None,
+        code_snippet: str | None = None,
+        error_before: str | None = None,
+        solution: str | None = None,
+        call_id: int | None = None,
+        validation_id: int | None = None,
+        tests_passed: int = 0,
+        execution_time_ms: int | None = None,
+        tags: list[str] | None = None,
+        embedding: list[float] | None = None,
+        metadata: dict | None = None,
+    ) -> int:
+        """Log an insight for persistence (hi_moe-3k7).
+
+        Args:
+            insight_type: Type of insight (successful_pattern, debugging_breakthrough,
+                         routing_decision, strategy)
+            title: Brief description of the insight
+            run_id: Associated run ID
+            problem_id: Associated problem ID
+            category: Category (code, architecture, optimization, error_handling)
+            confidence: Confidence score 0-1
+            description: Detailed explanation
+            context: Surrounding context
+            code_snippet: Associated code
+            error_before: Error that was fixed (for debugging insights)
+            solution: Solution that worked
+            call_id: Link to calls table
+            validation_id: Link to validations table
+            tests_passed: Number of tests passed
+            execution_time_ms: Execution time
+            tags: List of tags for search
+            embedding: Embedding vector for semantic search
+            metadata: Additional metadata
+
+        Returns:
+            Insight ID
+        """
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO insights (
+                    run_id, problem_id, insight_type, category, confidence,
+                    title, description, context, code_snippet, error_before,
+                    solution, call_id, validation_id, tests_passed,
+                    execution_time_ms, tags, embedding, metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id, problem_id, insight_type, category, confidence,
+                    title,
+                    description[:10000] if description else None,
+                    context[:5000] if context else None,
+                    code_snippet[:50000] if code_snippet else None,
+                    error_before[:5000] if error_before else None,
+                    solution[:10000] if solution else None,
+                    call_id, validation_id, tests_passed, execution_time_ms,
+                    json.dumps(tags) if tags else None,
+                    json.dumps(embedding) if embedding else None,
+                    json.dumps(metadata) if metadata else None,
+                ),
+            )
+            return cursor.lastrowid
+
+    def get_insights(
+        self,
+        insight_type: str | None = None,
+        category: str | None = None,
+        problem_id: str | None = None,
+        min_confidence: float = 0.0,
+        limit: int = 50,
+        tags: list[str] | None = None,
+    ) -> list[dict]:
+        """Query insights from the database (hi_moe-3k7).
+
+        Args:
+            insight_type: Filter by type
+            category: Filter by category
+            problem_id: Filter by problem
+            min_confidence: Minimum confidence threshold
+            limit: Maximum results
+            tags: Filter by tags (any match)
+
+        Returns:
+            List of insight dictionaries
+        """
+        with self._connect() as conn:
+            query = "SELECT * FROM insights WHERE confidence >= ?"
+            params: list = [min_confidence]
+
+            if insight_type:
+                query += " AND insight_type = ?"
+                params.append(insight_type)
+            if category:
+                query += " AND category = ?"
+                params.append(category)
+            if problem_id:
+                query += " AND problem_id = ?"
+                params.append(problem_id)
+            if tags:
+                # Match any tag using JSON contains
+                tag_conditions = []
+                for tag in tags:
+                    tag_conditions.append("tags LIKE ?")
+                    params.append(f'%"{tag}"%')
+                query += f" AND ({' OR '.join(tag_conditions)})"
+
+            query += " ORDER BY confidence DESC, created_at DESC LIMIT ?"
+            params.append(limit)
+
+            rows = conn.execute(query, params).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_valuable_insights(self, limit: int = 20) -> list[dict]:
+        """Get high-confidence insights (hi_moe-3k7).
+
+        Returns insights with confidence >= 0.7, ordered by value.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM valuable_insights LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_similar_insights(
+        self,
+        problem_id: str,
+        limit: int = 5,
+    ) -> list[dict]:
+        """Get insights from similar problems (hi_moe-3k7).
+
+        Simple text-based similarity for now. Could be enhanced with embeddings.
+        """
+        with self._connect() as conn:
+            # Get insights from the same problem first
+            rows = conn.execute(
+                """
+                SELECT * FROM insights
+                WHERE problem_id = ?
+                ORDER BY confidence DESC, reuse_count DESC
+                LIMIT ?
+                """,
+                (problem_id, limit),
+            ).fetchall()
+
+            # If not enough, get high-confidence insights from other problems
+            if len(rows) < limit:
+                remaining = limit - len(rows)
+                more = conn.execute(
+                    """
+                    SELECT * FROM insights
+                    WHERE problem_id != ? OR problem_id IS NULL
+                    ORDER BY confidence DESC, reuse_count DESC
+                    LIMIT ?
+                    """,
+                    (problem_id, remaining),
+                ).fetchall()
+                rows = list(rows) + list(more)
+
+            return [dict(r) for r in rows]
+
+    def increment_insight_reuse(self, insight_id: int) -> None:
+        """Increment reuse count for an insight (hi_moe-3k7).
+
+        Call this when an insight is retrieved and used.
+        """
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE insights SET
+                    reuse_count = reuse_count + 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (insight_id,),
+            )
+
+    def get_insight_stats(self) -> dict:
+        """Get statistics on stored insights (hi_moe-3k7)."""
+        with self._connect() as conn:
+            total = conn.execute("SELECT COUNT(*) FROM insights").fetchone()[0]
+            by_type = conn.execute(
+                """
+                SELECT insight_type, COUNT(*) as count
+                FROM insights GROUP BY insight_type
+                """,
+            ).fetchall()
+            by_category = conn.execute(
+                """
+                SELECT category, COUNT(*) as count
+                FROM insights GROUP BY category
+                """,
+            ).fetchall()
+            valuable = conn.execute(
+                "SELECT COUNT(*) FROM valuable_insights"
+            ).fetchone()[0]
+            avg_confidence = conn.execute(
+                "SELECT AVG(confidence) FROM insights"
+            ).fetchone()[0]
+
+        return {
+            "total_insights": total,
+            "valuable_insights": valuable,
+            "avg_confidence": avg_confidence or 0,
+            "by_type": {r["insight_type"]: r["count"] for r in by_type},
+            "by_category": {r["category"]: r["count"] for r in by_category if r["category"]},
+        }
 
     # -------------------------------------------------------------------------
     # Training data export
