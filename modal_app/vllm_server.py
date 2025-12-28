@@ -25,8 +25,7 @@ class ChatResponse(BaseModel):
 adapter_volume = modal.Volume.from_name("hi-moe-adapters", create_if_missing=True)
 logs_volume = modal.Volume.from_name("hi-moe-logs", create_if_missing=True)
 
-MODEL_ID = "Qwen/Qwen3-32B-AWQ"
-TOKENIZER_ID = "Qwen/Qwen3-32B"  # Use base model tokenizer (has vocab.json)
+MODEL_ID = "Qwen/Qwen2.5-32B-Instruct"  # hi_moe-73c: Switch to Qwen2.5
 ADAPTERS_PATH = "/adapters"
 LOGS_PATH = "/logs"
 MODEL_DIR = "/models"
@@ -39,20 +38,12 @@ def download_models():
 
     os.makedirs(MODEL_DIR, exist_ok=True)
 
-    # Download AWQ model
+    # Download model (Qwen2.5 includes tokenizer)
     print(f"Downloading {MODEL_ID}...")
     snapshot_download(
         MODEL_ID,
         local_dir=f"{MODEL_DIR}/{MODEL_ID}",
         ignore_patterns=["*.md", "*.txt"],
-    )
-
-    # Download tokenizer from base model
-    print(f"Downloading tokenizer from {TOKENIZER_ID}...")
-    snapshot_download(
-        TOKENIZER_ID,
-        local_dir=f"{MODEL_DIR}/{TOKENIZER_ID}",
-        allow_patterns=["tokenizer*", "vocab*", "merges*", "*.json"],
     )
     print("Model download complete!")
 
@@ -94,10 +85,8 @@ class VLLMServer:
 
         # Use local paths from baked-in model
         model_path = f"{MODEL_DIR}/{MODEL_ID}"
-        tokenizer_path = f"{MODEL_DIR}/{TOKENIZER_ID}"
 
         print(f"Loading model from {model_path}...")
-        print(f"Loading tokenizer from {tokenizer_path}...")
 
         # Discover available adapters
         self.adapters = {}
@@ -109,16 +98,15 @@ class VLLMServer:
 
         # Initialize vLLM with LoRA support
         # Use local paths for fast cold starts (model baked into image)
+        # hi_moe-73c: Qwen2.5-32B-Instruct (no AWQ quantization)
         self.llm = LLM(
             model=model_path,
-            tokenizer=tokenizer_path,
-            quantization="awq",
             enable_lora=True,
             max_loras=8,
             max_lora_rank=64,
             tensor_parallel_size=1,
             gpu_memory_utilization=0.9,
-            max_model_len=4096,  # Keep at 4096 to avoid OOM on A100-80GB
+            max_model_len=8192,  # Qwen2.5 supports up to 32K, use 8K for memory
             trust_remote_code=True,
             enforce_eager=True,  # Disable torch.compile to save memory
         )
@@ -236,16 +224,11 @@ class VLLMServer:
         """Internal chat method callable from ASGI endpoints."""
         import uuid
 
-        # Format messages as ChatML
-        # Qwen3-32B-AWQ has thinking mode enabled by default.
-        # Add /no_think to disable thinking for faster inference (hi_moe-4os)
+        # Format messages as ChatML (Qwen2.5 uses same format)
         prompt = ""
-        for i, msg in enumerate(messages):
+        for msg in messages:
             role = msg["role"]
             content = msg["content"]
-            # Add /no_think to last user message to disable thinking mode
-            if role == "user" and i == len(messages) - 1:
-                content = content + " /no_think"
             prompt += f"<|im_start|>{role}\n{content}<|im_end|>\n"
         prompt += "<|im_start|>assistant\n"
 
@@ -309,7 +292,7 @@ class VLLMServer:
             "status": "healthy",
             "model": MODEL_ID,
             "adapters": list(self.lora_requests.keys()),
-            "max_model_len": 4096,
+            "max_model_len": 8192,
         }
 
     @modal.asgi_app()
@@ -360,7 +343,7 @@ class VLLMServer:
                 "status": "healthy",
                 "model": MODEL_ID,
                 "adapters": list(self.lora_requests.keys()),
-                "max_model_len": 4096,
+                "max_model_len": 8192,
             }
 
         return api
