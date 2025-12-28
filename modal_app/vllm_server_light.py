@@ -1,6 +1,6 @@
 """Lightweight vLLM server for routing/planning tiers (hi_moe-4gd).
 
-Uses Qwen3-4B-Instruct on T4 GPU for fast, cheap inference on non-code tasks.
+Uses Qwen2.5-3B-Instruct on T4 GPU for fast, cheap inference on non-code tasks.
 This handles Architect planning and Dispatcher routing - no LoRA adapters needed.
 """
 from __future__ import annotations
@@ -24,7 +24,7 @@ class ChatResponse(BaseModel):
     usage: dict
 
 
-MODEL_ID = "Qwen/Qwen3-4B-Instruct"
+MODEL_ID = "Qwen/Qwen2.5-3B-Instruct"
 MODEL_DIR = "/models"
 
 
@@ -60,7 +60,7 @@ vllm_image = (
 
 
 @app.cls(
-    gpu="T4",  # Cheap GPU - 4B model fits easily
+    gpu="T4",  # Cheap GPU - 3B model fits easily
     image=vllm_image,
     timeout=600,  # 10 min max
     scaledown_window=300,  # 5 min warm (cheaper than main server)
@@ -122,14 +122,11 @@ class LightVLLMServer:
         """Chat completion with ChatML formatting."""
         import uuid
 
-        # Format as ChatML with /no_think for fast response
+        # Format as ChatML (Qwen2.5 uses same format as Qwen3)
         prompt = ""
-        for i, msg in enumerate(messages):
+        for msg in messages:
             role = msg["role"]
             content = msg["content"]
-            # Add /no_think to last user message
-            if role == "user" and i == len(messages) - 1:
-                content = content + " /no_think"
             prompt += f"<|im_start|>{role}\n{content}<|im_end|>\n"
         prompt += "<|im_start|>assistant\n"
 
