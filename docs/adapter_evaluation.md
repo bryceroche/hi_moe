@@ -1,4 +1,4 @@
-# LoRA Adapter Evaluation: HuggingFace vs Custom Training (hi_moe-z0a)
+# LoRA Adapter Evaluation: HuggingFace vs Custom Training (hi_moe-z0a, hi_moe-hlv)
 
 ## Current Setup
 
@@ -16,6 +16,48 @@ SPECIALIST_TO_ADAPTER = {
 ```
 
 Adapters are served via vLLM with dynamic loading. The system queries available adapters and matches specialists to adapter names.
+
+## Qwen 2.5 vs Qwen 3: HuggingFace Ecosystem Comparison (hi_moe-hlv)
+
+### Adapter & Finetune Counts (Dec 2025)
+
+| Model | Adapters | Finetunes | Merges | Quantizations |
+|-------|----------|-----------|--------|---------------|
+| [Qwen2.5-32B](https://huggingface.co/Qwen/Qwen2.5-32B) | 5 | 100 | 67 | 77 |
+| [Qwen2.5-32B-Instruct](https://huggingface.co/Qwen/Qwen2.5-32B-Instruct) | **56** | **1,195** | 52 | 142 |
+| [Qwen2.5-Coder-32B-Instruct](https://huggingface.co/Qwen/Qwen2.5-Coder-32B-Instruct) | 42 | 107 | 32 | 113 |
+| [Qwen3-32B](https://huggingface.co/Qwen/Qwen3-32B) | **171** | 161 | 15 | 132 |
+
+### Key Observations
+
+1. **Qwen 2.5-32B-Instruct has the largest finetune ecosystem** (1,195 finetunes) - 7x more than Qwen3
+2. **Qwen 3-32B has more raw adapters** (171 vs 56) but fewer production finetunes
+3. **Qwen 2.5 has specialized variants** (Coder, Math) while Qwen 3 is unified with thinking mode
+4. **Notable quality adapters exist for Qwen 2.5**:
+   - [LIMO math adapter](https://huggingface.co/t83714/qwen2.5-32b-instruct-limo-lora-adapter): 85% Math 500 pass@1
+   - Qwen2.5-Coder-32B: SOTA code, matches GPT-4o
+
+### Qwen 3 Adapter Examples
+
+| Adapter | Focus | Notes |
+|---------|-------|-------|
+| [qwen3-32b-verilog-lora](https://huggingface.co/sonyashijin/qwen3-32b-verilog-lora) | Verilog code | Hardware design |
+| [DeepNews-LoRA-Qwen3-32B](https://huggingface.co/flyfishxu/DeepNews-LoRA-Qwen3-32B) | News analysis | Credibility assessment |
+
+### Recommendation: Use Qwen 2.5 Family
+
+**For the hi-moe hierarchy, Qwen 2.5 is the better choice:**
+
+1. **Proven math adapter** - LIMO gives 85% Math 500 out of the box
+2. **Specialized code model** - Qwen2.5-Coder-32B is SOTA, no adapter needed
+3. **Larger finetune ecosystem** - More community validation and options
+4. **Architecture match** - Qwen 2.5 Coder/Math share architecture with base model
+
+**Suggested setup:**
+- **Base model**: Qwen2.5-32B-Instruct (for Monitor, Architect, Dispatcher)
+- **Code specialists**: Qwen2.5-Coder-32B-Instruct (no adapter needed)
+- **Math specialists**: Qwen2.5-32B-Instruct + LIMO adapter
+- **Other specialists**: Train custom adapters on Qwen2.5-32B-Instruct
 
 ## Available HuggingFace Options
 
