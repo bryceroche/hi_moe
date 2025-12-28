@@ -1,5 +1,16 @@
 # LoRA Training Specification
 
+> ⚠️ **DEPRECATED (hi_moe-ka5)**: Custom adapter training is a massive compute sink.
+> Use pre-trained HuggingFace adapters instead. See [adapter_evaluation.md](adapter_evaluation.md).
+>
+> **Recommended setup:**
+> - Math: [LIMO adapter](https://huggingface.co/t83714/qwen2.5-32b-instruct-limo-lora-adapter) (85% Math 500)
+> - Code/Debug/Refactor: [Qwen2.5-Coder-32B](https://huggingface.co/Qwen/Qwen2.5-Coder-32B-Instruct) (no adapter needed)
+
+---
+
+*The content below is kept for historical reference only.*
+
 > Training pipeline for specialist LoRA adapters, starting with python-lora and math-lora.
 
 ## Overview

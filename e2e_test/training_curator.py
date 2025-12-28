@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """Training data curation CLI (hi_moe-dh1).
 
+⚠️  DEPRECATED (hi_moe-ka5): Custom adapter training is a compute sink.
+Use pre-trained HuggingFace adapters instead. See docs/adapter_evaluation.md.
+
+This tool may still be useful for analyzing run data, but exporting for
+training is no longer recommended.
+
 Tool to review, filter, and export training data for fine-tuning.
 
 Usage:
@@ -8,8 +14,8 @@ Usage:
     python -m e2e_test.training_curator list --passed           # Only passing examples
     python -m e2e_test.training_curator list --specialist python # Filter by specialist
     python -m e2e_test.training_curator stats                   # Show statistics
-    python -m e2e_test.training_curator export sft output.jsonl # Export SFT data
-    python -m e2e_test.training_curator export dpo output.jsonl # Export DPO pairs
+    python -m e2e_test.training_curator export sft output.jsonl # Export SFT data (deprecated)
+    python -m e2e_test.training_curator export dpo output.jsonl # Export DPO pairs (deprecated)
 """
 from __future__ import annotations
 

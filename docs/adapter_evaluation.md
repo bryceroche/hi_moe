@@ -1,4 +1,7 @@
-# LoRA Adapter Evaluation: HuggingFace vs Custom Training (hi_moe-z0a, hi_moe-hlv)
+# LoRA Adapter Evaluation: HuggingFace vs Custom Training (hi_moe-z0a, hi_moe-hlv, hi_moe-ka5)
+
+> **Decision (hi_moe-ka5):** Stop custom adapter training. Use HuggingFace adapters exclusively.
+> Custom training is a massive compute sink when community adapters already achieve SOTA.
 
 ## Current Setup
 

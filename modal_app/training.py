@@ -1,5 +1,23 @@
-"""LoRA training jobs on Modal."""
+"""LoRA training jobs on Modal.
+
+⚠️  DEPRECATED (hi_moe-ka5): Custom adapter training is a compute sink.
+Use pre-trained HuggingFace adapters instead:
+- Math: t83714/qwen2.5-32b-instruct-limo-lora-adapter (85% Math 500)
+- Code: Qwen2.5-Coder-32B-Instruct (SOTA, no adapter needed)
+- Debug/Refactor: Qwen2.5-Coder-32B-Instruct (73.7% Aider)
+
+See docs/adapter_evaluation.md for recommended setup.
+This file is kept for reference but should not be used.
+"""
 from __future__ import annotations
+
+import warnings
+warnings.warn(
+    "modal_app/training.py is deprecated. Use HuggingFace adapters instead. "
+    "See hi_moe-ka5 and docs/adapter_evaluation.md",
+    DeprecationWarning,
+    stacklevel=2
+)
 
 import modal
 
