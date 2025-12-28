@@ -541,11 +541,12 @@ class LLMClient:
         from openai import AsyncOpenAI
         import httpx
 
-        # Configure httpx with redirect limits (hi_moe-56q)
-        # Modal returns 303 for async polling - limit to prevent infinite loops
+        # Configure httpx with redirect following for Modal's 303 polling (hi_moe-2dg)
+        # Modal returns 303 after 150s - client must follow redirects to poll for result
         http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(300.0),  # 5 min per-request timeout
-            max_redirects=10,  # Reduced from default 20
+            max_redirects=20,  # Allow up to 20 redirects (~50 min total)
+            follow_redirects=True,  # Essential: httpx doesn't follow 303 by default
         )
         client = AsyncOpenAI(
             base_url=f"{self.endpoint}/v1",
