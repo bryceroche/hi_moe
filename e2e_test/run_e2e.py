@@ -198,9 +198,9 @@ async def main():
     parser.add_argument(
         "--routing-mode",
         type=str,
-        choices=["winner_take_all", "probabilistic", "blended"],
+        choices=["winner_take_all", "probabilistic", "blended", "ensemble"],
         default="winner_take_all",
-        help="Routing mode for specialist selection (hi_moe-zrn)",
+        help="Routing mode: winner_take_all, probabilistic, blended, or ensemble (hi_moe-zrn, hi_moe-oyp)",
     )
     args = parser.parse_args()
 

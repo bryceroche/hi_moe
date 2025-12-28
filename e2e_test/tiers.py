@@ -57,15 +57,17 @@ class TaskStatus(Enum):
 
 
 class RoutingMode(Enum):
-    """Routing mode for specialist selection (hi_moe-zrn).
+    """Routing mode for specialist selection (hi_moe-zrn, hi_moe-oyp).
 
     WINNER_TAKE_ALL: Always pick highest-scoring specialist (default)
     PROBABILISTIC: Sample proportionally to similarity scores
     BLENDED: Return blend weights for LoRA composition (future)
+    ENSEMBLE: Run multiple specialists in parallel, pick best solution (hi_moe-oyp)
     """
     WINNER_TAKE_ALL = "winner_take_all"
     PROBABILISTIC = "probabilistic"
     BLENDED = "blended"
+    ENSEMBLE = "ensemble"
 
 
 @dataclass
@@ -967,6 +969,10 @@ class RoutingDispatcher:
         """Route task to specialist and execute with retry logic (hi_moe-a4w)."""
         logger.info(f"[Dispatcher] Routing task: {task.task_id}")
 
+        # Ensemble mode: run multiple specialists in parallel (hi_moe-oyp)
+        if self.routing_mode == RoutingMode.ENSEMBLE:
+            return await self._execute_ensemble(task)
+
         # Inject memory context if available (hi_moe-mz5)
         memory_context = self.memory.get_memory_prompt()
         if memory_context:
@@ -1243,6 +1249,114 @@ class RoutingDispatcher:
             )
 
         return final_outcome
+
+    async def _execute_ensemble(self, task: Task, num_specialists: int = 3) -> Outcome:
+        """Execute task with multiple specialists in parallel, pick best (hi_moe-oyp).
+
+        Runs top N specialists concurrently, validates each solution, and returns
+        the one with the highest test pass rate. This leverages the MoE architecture
+        for improved robustness on hard problems.
+
+        Args:
+            task: Task to execute
+            num_specialists: Number of specialists to run (default: 3)
+
+        Returns:
+            Best outcome based on validation results
+        """
+        logger.info(f"[Dispatcher] Ensemble mode: running {num_specialists} specialists in parallel")
+
+        # Get top specialists based on routing scores
+        specialists_to_try = self._get_top_specialists(task, num_specialists)
+        logger.info(f"[Dispatcher] Ensemble specialists: {specialists_to_try}")
+
+        # Run all specialists in parallel
+        async def run_specialist(specialist: str) -> tuple[str, Outcome]:
+            try:
+                outcome = await self.fleet.execute(task, specialist)
+                return specialist, outcome
+            except Exception as e:
+                logger.error(f"[Dispatcher] Ensemble specialist {specialist} failed: {e}")
+                return specialist, Outcome(
+                    task_id=task.task_id,
+                    status=TaskStatus.FAILED,
+                    error=str(e),
+                )
+
+        results = await asyncio.gather(*[run_specialist(s) for s in specialists_to_try])
+
+        # Validate each result and score
+        best_outcome: Outcome | None = None
+        best_score = -1
+        best_specialist = ""
+
+        test_cases = task.context.get("test_cases", []) if task.context else []
+        function_name = task.context.get("function_name") if task.context else None
+
+        for specialist, outcome in results:
+            if outcome.status != TaskStatus.COMPLETED or not outcome.code:
+                logger.debug(f"[Dispatcher] Ensemble {specialist}: no valid code")
+                continue
+
+            # Validate the solution
+            if test_cases and function_name:
+                from .validator import validate_solution
+                validation = validate_solution(
+                    code=outcome.code,
+                    test_cases=test_cases,
+                    function_name=function_name,
+                )
+                score = validation.passed_cases
+                total = validation.total_cases
+                logger.info(
+                    f"[Dispatcher] Ensemble {specialist}: {score}/{total} tests passed"
+                )
+
+                if score > best_score:
+                    best_score = score
+                    best_outcome = outcome
+                    best_specialist = specialist
+            else:
+                # No validation possible, take first completed
+                if best_outcome is None:
+                    best_outcome = outcome
+                    best_specialist = specialist
+                    logger.info(f"[Dispatcher] Ensemble {specialist}: completed (no validation)")
+
+        if best_outcome:
+            logger.info(
+                f"[Dispatcher] Ensemble winner: {best_specialist} "
+                f"(score: {best_score}/{len(test_cases) if test_cases else 'N/A'})"
+            )
+            return best_outcome
+
+        # All specialists failed
+        logger.error("[Dispatcher] Ensemble: all specialists failed")
+        return Outcome(
+            task_id=task.task_id,
+            status=TaskStatus.FAILED,
+            error=f"Ensemble failed: all {num_specialists} specialists produced no valid code",
+            metadata={"ensemble_specialists": specialists_to_try},
+        )
+
+    def _get_top_specialists(self, task: Task, n: int) -> list[str]:
+        """Get top N specialists for a task based on routing scores (hi_moe-oyp)."""
+        all_specialists = ["python", "math", "algorithms", "data_structures"]
+
+        # Use embedding router if available for ranked selection
+        if self.embedding_router:
+            try:
+                weights = self.embedding_router.predict_weighted(task.objective)
+                # Sort by weight descending
+                sorted_specialists = sorted(weights.items(), key=lambda x: x[1], reverse=True)
+                return [s for s, _ in sorted_specialists[:n]]
+            except Exception as e:
+                logger.warning(f"[Dispatcher] Embedding router failed, using defaults: {e}")
+
+        # Fallback: use heuristic to get primary, then add others
+        primary, _, _ = self._select_specialist(task, exclude=[])
+        others = [s for s in all_specialists if s != primary]
+        return [primary] + others[:n - 1]
 
     def _select_specialist(
         self, task: Task, exclude: list[str] | None = None
