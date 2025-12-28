@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 # Insight types
 INSIGHT_SUCCESSFUL_PATTERN = "successful_pattern"
+INSIGHT_COMMON_PITFALL = "common_pitfall"  # What NOT to do
 INSIGHT_DEBUGGING_BREAKTHROUGH = "debugging_breakthrough"
 INSIGHT_ROUTING_DECISION = "routing_decision"
 INSIGHT_STRATEGY = "strategy"
@@ -120,6 +121,19 @@ class InsightExtractor:
                 run_id=run_id,
                 problem_id=problem_id,
                 code=code,
+                tests_passed=tests_passed,
+                tests_total=tests_total,
+            )
+            if insight_id:
+                insight_ids.append(insight_id)
+
+        # Extract common pitfalls from failures (learn what NOT to do)
+        if not passed and code and error:
+            insight_id = self.extract_common_pitfall(
+                run_id=run_id,
+                problem_id=problem_id,
+                code=code,
+                error=error,
                 tests_passed=tests_passed,
                 tests_total=tests_total,
             )
@@ -211,6 +225,160 @@ class InsightExtractor:
 
         logger.debug(f"[InsightExtractor] Stored successful pattern: {title} (confidence: {confidence:.2f})")
         return insight_id
+
+    def extract_common_pitfall(
+        self,
+        run_id: str,
+        problem_id: str,
+        code: str,
+        error: str,
+        tests_passed: int = 0,
+        tests_total: int = 0,
+    ) -> int | None:
+        """Extract a common pitfall (what NOT to do).
+
+        Args:
+            run_id: Run identifier
+            problem_id: Problem identifier
+            code: Failed code
+            error: Error message
+            tests_passed: Number of tests passed
+            tests_total: Total tests
+
+        Returns:
+            Insight ID if stored, None otherwise
+        """
+        # Classify error and determine if worth capturing
+        error_type = self._classify_error(error)
+
+        # Higher confidence for common, reproducible errors
+        confidence = 0.5
+        if error_type in ["SyntaxError", "NameError"]:
+            confidence = 0.7  # Basic mistakes worth remembering
+        elif error_type in ["IndexError", "KeyError"]:
+            confidence = 0.8  # Boundary errors are common pitfalls
+        elif error_type == "WrongAnswer":
+            confidence = 0.9  # Logic errors are very valuable to learn from
+        elif error_type in ["TypeError", "ValueError"]:
+            confidence = 0.75  # Type mismatches are common
+
+        if confidence < self.min_confidence_for_storage:
+            return None
+
+        # Generate descriptive title
+        title = f"AVOID: {error_type} - {self._summarize_error(error)}"
+
+        # Detect the category of mistake
+        category = CATEGORY_ERROR_HANDLING
+
+        # Extract what went wrong
+        bad_pattern = self._extract_bad_pattern(code, error, error_type)
+
+        # Generate actionable description
+        description = self._generate_pitfall_description(error_type, error, tests_passed, tests_total)
+
+        # Tags for searchability
+        tags = [error_type, "pitfall", "avoid"]
+        if tests_total > 0 and tests_passed > 0:
+            tags.append("partial_failure")  # Some tests passed, logic error
+        else:
+            tags.append("complete_failure")
+
+        insight_id = self.db.log_insight(
+            insight_type=INSIGHT_COMMON_PITFALL,
+            title=title[:100],
+            run_id=run_id,
+            problem_id=problem_id,
+            category=category,
+            confidence=confidence,
+            description=description,
+            code_snippet=code[:5000] if code else None,
+            error_before=error[:2000] if error else None,
+            solution=bad_pattern,  # Store the problematic pattern
+            tests_passed=tests_passed,
+            tags=tags,
+        )
+
+        logger.debug(f"[InsightExtractor] Stored pitfall: {title[:50]}... (confidence: {confidence:.2f})")
+        return insight_id
+
+    def _extract_bad_pattern(self, code: str, error: str, error_type: str) -> str:
+        """Extract the problematic pattern from failed code.
+
+        Returns a distilled description of what went wrong.
+        """
+        patterns = []
+
+        if error_type == "IndexError":
+            # Look for array access patterns
+            if "[" in code and "]" in code:
+                patterns.append("Unchecked array/list index access")
+            if "for i in range" in code:
+                patterns.append("Loop bounds may exceed array length")
+
+        elif error_type == "KeyError":
+            if "[" in code:
+                patterns.append("Dictionary key access without checking existence")
+            if ".get(" not in code:
+                patterns.append("Use .get() with default instead of direct access")
+
+        elif error_type == "TypeError":
+            if "None" in error:
+                patterns.append("Operating on None value")
+            if "+" in code:
+                patterns.append("Type mismatch in concatenation/arithmetic")
+
+        elif error_type == "WrongAnswer":
+            patterns.append("Logic error - output doesn't match expected")
+            # Look for common logic issues
+            if "==" in code and "=" in code:
+                patterns.append("Check equality vs assignment")
+            if "and" in code or "or" in code:
+                patterns.append("Review boolean logic conditions")
+
+        elif error_type == "SyntaxError":
+            patterns.append("Syntax error - check parentheses, colons, indentation")
+
+        if not patterns:
+            patterns.append(f"Error type: {error_type}")
+
+        return "; ".join(patterns)
+
+    def _generate_pitfall_description(
+        self,
+        error_type: str,
+        error: str,
+        tests_passed: int,
+        tests_total: int,
+    ) -> str:
+        """Generate actionable description of the pitfall."""
+        desc_parts = []
+
+        # Error context
+        desc_parts.append(f"Encountered {error_type}")
+
+        # Test coverage context
+        if tests_total > 0:
+            if tests_passed == 0:
+                desc_parts.append(f"Failed all {tests_total} tests")
+            else:
+                desc_parts.append(f"Passed {tests_passed}/{tests_total} tests before failing")
+
+        # Actionable advice based on error type
+        advice = {
+            "IndexError": "Always validate array bounds before access",
+            "KeyError": "Check key existence with 'in' or use .get() with default",
+            "TypeError": "Ensure type compatibility before operations",
+            "ValueError": "Validate input values before processing",
+            "WrongAnswer": "Review algorithm logic against edge cases",
+            "SyntaxError": "Check code structure and Python syntax",
+            "NameError": "Ensure all variables are defined before use",
+            "ZeroDivisionError": "Add zero-check before division operations",
+        }
+        if error_type in advice:
+            desc_parts.append(f"Tip: {advice[error_type]}")
+
+        return ". ".join(desc_parts)
 
     def extract_debugging_breakthrough(
         self,
