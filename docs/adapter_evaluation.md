@@ -140,6 +140,31 @@ If we have enough training data and the hierarchy proves valuable:
 3. [ ] Set up A/B test framework (already have hi_moe-c5m)
 4. [ ] Evaluate adapter loading latency with vLLM
 
+## 7B Dispatcher Prompt (hi_moe-jhf)
+
+For sub-100ms routing, use `e2e_test/prompts/dispatcher_7b.py`:
+
+```python
+from e2e_test.prompts import build_prompt, VLLM_GUIDED_CONFIG
+
+# Build prompt for a problem
+messages = build_prompt("Write a function to find two sum")
+
+# Use with vLLM guided decoding
+response = client.chat.completions.create(
+    model="Qwen/Qwen2.5-7B-Instruct",
+    messages=messages,
+    extra_body=VLLM_GUIDED_CONFIG,  # Enforces JSON schema
+    max_tokens=30,
+)
+# Output: {"specialist": "python", "confidence": 0.75}
+```
+
+**Token budget:**
+- With few-shot: ~360 input + 30 output
+- Minimal: ~130 input + 30 output
+- Target TTFT: <100ms on A100/H100
+
 ## Sources
 
 - [LIMO LoRA Adapter](https://huggingface.co/t83714/qwen2.5-32b-instruct-limo-lora-adapter)
